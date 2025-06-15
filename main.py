@@ -151,9 +151,28 @@ async def initialize_usd_value_hedged_strangle(
                 f"(price: {put_price_btc:.8f} BTC)"
             )
 
-    # Save portfolio after all options are added
+    # Calculate total USD hedge amount with correct sign
+    # If we sold options (positive premium), we need to buy USD hedge (positive notional)
+    # If we bought options (negative premium), we need to sell USD hedge (negative notional)
+    total_usd_hedge = 0.0
+    if call_option and call_price_btc is not None:
+        # For call options, premium is positive when sold, negative when bought
+        total_usd_hedge += call_usd_value
+    if put_option and put_price_btc is not None:
+        # For put options, premium is positive when sold, negative when bought
+        total_usd_hedge += put_usd_value
+
+    # Track initial USD hedge in portfolio
     portfolio.initial_usd_hedged = True
+    portfolio.initial_usd_hedge_position = total_usd_hedge
+    portfolio.initial_usd_hedge_avg_entry = current_price
     portfolio.last_hedge_price = current_price
+
+    logger.info(
+        f"Initial USD hedge: {'Buy' if total_usd_hedge > 0 else 'Sell'} "
+        f"${abs(total_usd_hedge):,.2f} notional at ${current_price:,.2f}"
+    )
+
     return portfolio
 
 

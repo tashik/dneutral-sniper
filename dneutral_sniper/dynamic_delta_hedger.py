@@ -176,7 +176,6 @@ class DynamicDeltaHedger:
             logger.info(
                 f"Price change: {price_change:.6f} {'$' if self.config.ddh_step_mode == 'absolute' else '%'} "
                 f"(threshold: {threshold:.6f}), "
-                f"Time since last hedge: {time_since_last_hedge:.1f}s, "
                 f"Hedging: {'YES' if should_hedge else 'TIME_BASED' if time_based_hedge else 'NO'}"
             )
         else:
