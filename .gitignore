@@ -3,4 +3,6 @@ __pycache__
 portfolio.json
 pnl_chart.png
 .vscode/
-
+*.log
+*.png
+*.pyc

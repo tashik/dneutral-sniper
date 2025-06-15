@@ -122,7 +122,7 @@ async def test_hedger_triggers_hedge():
         instrument_name="BTC-PERPETUAL",
         volatility=0.4,
         price_check_interval=0.1,
-        min_contract_usd=10.0
+        min_hedge_usd=10.0
     )
     portfolio = DummyPortfolio()
     client = DummyDeribitClient()
@@ -152,7 +152,7 @@ async def test_hedger_sign_and_direction():
         instrument_name="BTC-PERPETUAL",
         volatility=0.4,
         price_check_interval=0.1,
-        min_contract_usd=10.0
+        min_hedge_usd=10.0
     )
     portfolio = DummyPortfolio()
     client = DummyDeribitClient()
@@ -171,3 +171,48 @@ async def test_hedger_sign_and_direction():
     # required_hedge = 0.5, usd_qty = 50, rounded to 50
     assert portfolio.futures_position == 20.0  # -30 + 50
     assert portfolio.hedge_calls[-1] == (50.0, 100.0)
+
+@pytest.mark.asyncio
+async def test_hedge_direction_after_fix():
+    """Regression test for hedge direction fix.
+
+    Verifies that a positive delta results in a SELL order (negative usd_qty) and
+    a negative delta results in a BUY order (positive usd_qty).
+    """
+    config = HedgerConfig(
+        ddh_min_trigger_delta=0.01,
+        ddh_target_delta=0.0,
+        ddh_step_mode="absolute",
+        ddh_step_size=1,
+        instrument_name="BTC-PERPETUAL",
+        volatility=0.4,
+        price_check_interval=0.1,
+        min_hedge_usd=10.0
+    )
+    portfolio = DummyPortfolio()
+    client = DummyDeribitClient()
+    hedger = DynamicDeltaHedger(config, portfolio, client)
+    hedger._get_current_price = AsyncMock(return_value=100.0)
+
+    # Test 1: Positive delta should result in SELL (negative usd_qty)
+    hedger.cur_delta = 0.15  # Current delta is positive
+    hedger.target_delta = 0.0
+    await hedger._execute_hedge_if_needed()
+
+    # Should sell to reduce delta (negative usd_qty)
+    assert portfolio.futures_position < 0
+    # Expected: -0.15 BTC * $100 = -$15, rounded to nearest $10 is -$20
+    assert portfolio.hedge_calls[-1][0] == -10.0
+
+    # Reset portfolio for next test
+    portfolio.futures_position = 0.0
+    portfolio.hedge_calls.clear()
+
+    # Test 2: Negative delta should result in BUY (positive usd_qty)
+    hedger.cur_delta = -0.25  # Current delta is negative
+    await hedger._execute_hedge_if_needed()
+
+    # Should buy to increase delta (positive usd_qty)
+    assert portfolio.futures_position > 0
+    # Expected: 0.25 BTC * $100 = $25, rounded down to nearest $10 is $20
+    assert portfolio.hedge_calls[-1][0] == 20.0
