@@ -1,0 +1,6 @@
+.venv/
+__pycache__
+portfolio.json
+pnl_chart.png
+.vscode/
+
