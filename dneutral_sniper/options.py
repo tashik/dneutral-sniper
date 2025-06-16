@@ -108,7 +108,7 @@ class OptionModel:
             # For standard options, value is already in USD
             return mark_price * option.quantity
 
-    async def calculate_portfolio_net_delta(self, current_price: float, volatility: float, risk_free_rate: float = 0.0) -> float:
+    async def calculate_portfolio_net_delta(self, current_price: float, volatility: float, risk_free_rate: float = 0.0, include_static_hedge: bool = False) -> float:
         """
         Calculate true portfolio net delta in BTC.
 
@@ -119,6 +119,13 @@ class OptionModel:
         For standard options (USD-settled):
         - Delta is in USD per contract
         - Value is already in USD, needs to be converted to BTC for net delta
+
+        Args:
+            current_price: Current price of the underlying
+            volatility: Annualized volatility
+            risk_free_rate: Risk-free interest rate
+            include_static_hedge: Whether to include the static USD hedge in the delta calculation.
+                                Should be False for dynamic hedging to avoid double-counting.
 
         Returns:
             float: Net delta in BTC
@@ -171,13 +178,17 @@ class OptionModel:
                 f"usd_value={usd_value:.2f}, position_delta_btc={position_delta_btc:.6f}"
             )
 
-        # Add static and dynamic futures hedges (already in BTC)
-        static_hedge_btc = getattr(self.portfolio, 'initial_usd_hedge_position', 0.0) / current_price if current_price > 0 else 0.0
+        # Add dynamic futures hedge (already in BTC)
         dynamic_hedge_btc = getattr(self.portfolio, 'futures_position', 0.0) / current_price if current_price > 0 else 0.0
+        total_net_delta_btc += dynamic_hedge_btc
 
-        logger.info(f"Static USD hedge (BTC): {static_hedge_btc:.6f}, Dynamic futures hedge (BTC): {dynamic_hedge_btc:.6f}")
-
-        total_net_delta_btc += static_hedge_btc + dynamic_hedge_btc
+        # Optionally add static hedge if requested
+        if include_static_hedge:
+            static_hedge_btc = getattr(self.portfolio, 'initial_usd_hedge_position', 0.0) / current_price if current_price > 0 else 0.0
+            total_net_delta_btc += static_hedge_btc
+            logger.info(f"Including static hedge in delta: {static_hedge_btc:.6f} BTC")
+        
+        logger.info(f"Dynamic futures hedge (BTC): {dynamic_hedge_btc:.6f}")
         logger.info(f"Portfolio net delta (BTC): {total_net_delta_btc:.6f}")
 
         return total_net_delta_btc
