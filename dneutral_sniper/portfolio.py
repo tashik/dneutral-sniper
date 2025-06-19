@@ -1,7 +1,10 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 import json
-from dneutral_sniper.models import OptionType, VanillaOption
+import logging
+from dneutral_sniper.models import OptionType, VanillaOption, ContractType
+
+logger = logging.getLogger(__name__)
 
 class Portfolio:
     def save_to_file(self, filename: str):
@@ -24,8 +27,11 @@ class Portfolio:
                     "expiry": o.expiry.isoformat(),
                     "option_type": o.option_type.value,
                     "underlying": o.underlying,
+                    "contract_type": o.contract_type.value,
                     "mark_price": o.mark_price,
-                    "iv": o.iv
+                    "iv": o.iv,
+                    "usd_value": o.usd_value,
+                    "delta": o.delta
                 }
                 for o in self.options.values()
             ]
@@ -61,8 +67,11 @@ class Portfolio:
                     expiry=datetime.fromisoformat(o["expiry"]),
                     quantity=o["quantity"],
                     underlying=o["underlying"],
+                    contract_type=ContractType(o.get("contract_type", "inverse")),  # Default to inverse for backward compatibility
                     mark_price=o.get("mark_price"),
-                    iv=o.get("iv")
+                    iv=o.get("iv"),
+                    usd_value=o.get("usd_value"),
+                    delta=o.get("delta")
                 )
                 portfolio.add_option(option)
         except FileNotFoundError:

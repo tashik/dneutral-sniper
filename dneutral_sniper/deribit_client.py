@@ -5,6 +5,7 @@ import logging
 from typing import Optional, Callable, Dict
 from dataclasses import dataclass
 import itertools
+import time
 import traceback
 
 logger = logging.getLogger(__name__)
@@ -17,13 +18,13 @@ class DeribitCredentials:
 
 class DeribitWebsocketClient:
     # ...
-    def __init__(self, credentials: Optional[DeribitCredentials] = None):
+    def __init__(self, credentials: Optional[DeribitCredentials] = None, is_test: bool = False):
         self.credentials = credentials
         self.req_ws: Optional[websockets.WebSocketClientProtocol] = None
         self.sub_ws: Optional[websockets.WebSocketClientProtocol] = None
         self.price_callback: Optional[Callable[[str, float], None]] = None
         self.running = False
-        self.ws_url = self.TESTNET_WS_URL if credentials and credentials.test else self.MAINNET_WS_URL
+        self.ws_url = self.TESTNET_WS_URL if is_test or (credentials and credentials.test) else self.MAINNET_WS_URL
         self.req_listener_task = None
         self.sub_listener_task = None
         self.pending_requests = {}  # id -> Future
@@ -241,11 +242,11 @@ class DeribitWebsocketClient:
         """
         Fetch mark price and implied volatility (mark_iv) for an instrument.
         First checks local cache before making a websocket request.
-        
+
         Args:
             instrument_name: Name of the instrument to fetch data for
             force_refresh: If True, bypass cache and fetch fresh data
-            
+
         Returns:
             tuple: (mark_price, iv) where iv is 0 for futures, or (None, 0.0) on error
         """
@@ -254,39 +255,39 @@ class DeribitWebsocketClient:
             cached = self.price_iv_cache[instrument_name]
             logger.debug(f"Cache hit for {instrument_name}: {cached}")
             return cached["mark_price"], cached["iv"]
-            
+
         try:
             if not self.req_ws:
                 await self.connect()
-                
+
             response = await self.send_request(
                 "public/get_book_summary_by_instrument",
                 {"instrument_name": instrument_name}
             )
-            
+
             result = response.get("result")
             if isinstance(result, list) and result:
                 mark_price = result[0].get("mark_price")
                 mark_iv = result[0].get("mark_iv")
-                
+
                 if mark_iv is not None:
                     iv = mark_iv / 100 if mark_iv > 3 else mark_iv  # Deribit sometimes returns percent
                 else:
                     iv = 0.0  # Futures or missing IV
-                    
+
                 # Update cache
                 self.price_iv_cache[instrument_name] = {
                     "mark_price": mark_price,
                     "iv": iv,
                     "timestamp": time.time()
                 }
-                
+
                 logger.info(f"Fetched mark price for {instrument_name}: {mark_price}, IV: {iv}")
                 return mark_price, iv
-                
+
             logger.warning(f"No valid result for {instrument_name}: {result}")
             return None, 0.0
-            
+
         except Exception as e:
             logger.error(f"Error in get_instrument_mark_price_and_iv: {e}\n{traceback.format_exc()}")
             await self.reconnect()
