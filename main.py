@@ -1,188 +1,187 @@
+"""
+DNEUTRAL SNIPER - Multi-Portfolio Delta Hedging System
+
+This is the main entry point for the DNEUTRAL SNIPER application, which provides
+automated delta hedging for multiple option portfolios using the Deribit exchange.
+"""
 import asyncio
 import logging
+import sys
 from datetime import datetime
-from pathlib import Path
-from typing import Optional
+from typing import Tuple
 
-from dneutral_sniper.dynamic_delta_hedger import DynamicDeltaHedger, HedgerConfig
-from dneutral_sniper.deribit_client import DeribitWebsocketClient
-from dneutral_sniper.portfolio import Portfolio
-from dneutral_sniper.models import OptionType, VanillaOption, ContractType
+from dneutral_sniper.deribit_client import DeribitWebsocketClient, DeribitCredentials
+from dneutral_sniper.hedging_manager import HedgingManager, HedgerConfig
+from dneutral_sniper.portfolio_manager import PortfolioManager
+from dneutral_sniper.subscription_manager import SubscriptionManager
 
-# Configuration
-CONFIG = {
-    "portfolio_file": "portfolio.json",
-    "underlying": "BTC",
-    "expiry_date": "2025-06-27T08:00:00",  # June 27, 2025, 08:00:00 UTC
-    "call_strike": 110000,
-    "put_strike": 100000,
-    "option_quantity": 2.0,
-    "contract_type": "inverse",  # or "standard"
-    "deribit_testnet": False,
+# Default configuration
+DEFAULT_CONFIG = {
+    "portfolios_dir": "portfolios",  # Directory to store portfolio files
+    "underlying": "BTC",  # Default underlying asset
+    "deribit_testnet": False,  # Use Deribit testnet
+    "deribit_credentials": {
+        "key": "YOUR_API_KEY",
+        "secret": "YOUR_API_SECRET",
+        "testnet": False
+    },
+    # Default hedger configuration
+    "hedger_config": {
+        "ddh_min_trigger_delta": 0.01,  # 0.01 BTC
+        "ddh_target_delta": 0.0,  # Target delta-neutral
+        "ddh_step_mode": "percentage",
+        "ddh_step_size": 0.01,  # 1%
+        "price_check_interval": 2.0,  # seconds
+        "min_hedge_usd": 10.0  # Minimum USD notional for a hedge order
+    }
 }
 
-def setup_logging():
-    """Configure logging with a more detailed format."""
-    log_format = (
-        "%(asctime)s - %(name)s - %(levelname)s - "
-        "%(message)s [%(filename)s:%(lineno)d]"
-    )
-    logging.basicConfig(
-        level=logging.INFO,
-        format=log_format,
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler('dneutral_sniper.log')
-        ]
-    )
-    return logging.getLogger(__name__)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+        # logging.FileHandler('dneutral_sniper.log')
+    ]
+)
+logger = logging.getLogger(__name__)
 
-logger = setup_logging()
+# Global flag for shutdown signal
+shutdown_event = asyncio.Event()
 
-async def create_option(
-    deribit_client: DeribitWebsocketClient,
-    option_type: OptionType,
-    strike: float,
-    expiry: datetime,
-    quantity: float,
-    contract_type: ContractType = ContractType.INVERSE,
-) -> Optional[VanillaOption]:
-    """Create and validate an option with proper error handling."""
+
+def handle_shutdown(sig, frame):
+    """Handle shutdown signal from OS."""
+    logger.info("Shutdown signal received, shutting down...")
+    shutdown_event.set()
+    sys.exit(0)
+
+
+async def initialize_managers(
+    config: dict
+) -> Tuple[PortfolioManager, SubscriptionManager, HedgingManager, DeribitWebsocketClient]:
+    """Initialize and return all manager instances."""
     try:
-        expiry_str = expiry.strftime('%d%b%y').upper()
-        underlying = f"BTC-{expiry_str}"
-        instrument_name = f"BTC-{expiry_str}-{int(strike)}-{option_type.value[0].upper()}"
+        # Initialize Deribit client with credentials if provided
+        deribit_credentials = config.get("deribit_credentials")
+        credentials_obj = None
 
-        option = VanillaOption(
-            instrument_name=instrument_name,
-            option_type=option_type,
-            strike=strike,
-            expiry=expiry,
-            quantity=quantity,
-            underlying=underlying,
-            contract_type=contract_type
+        if deribit_credentials and deribit_credentials.get("key") and deribit_credentials.get("secret"):
+            credentials_obj = DeribitCredentials(
+                client_id=deribit_credentials["key"],
+                client_secret=deribit_credentials["secret"],
+                test=deribit_credentials.get("testnet", True)
+            )
+
+        is_test = deribit_credentials.get("testnet", True) if deribit_credentials else False
+        deribit_client = DeribitWebsocketClient(
+            credentials=credentials_obj,
+            is_test=is_test
         )
 
-        # Verify the option exists and get mark price
-        mark_price_btc, _ = await deribit_client.get_instrument_mark_price_and_iv(instrument_name)
-        if mark_price_btc is None:
-            logger.warning(f"Could not fetch mark price for {instrument_name}")
-            return None
+        # Connect to Deribit
+        await deribit_client.connect()
 
-        return option
+        # Initialize managers
+        portfolio_manager = PortfolioManager(portfolios_dir=config["portfolios_dir"])
+        await portfolio_manager.initialize()
+
+        subscription_manager = SubscriptionManager()
+
+        # Initialize HedgingManager with default configuration
+        hc = config["hedger_config"]
+        hedger_config = HedgerConfig(
+            ddh_min_trigger_delta=hc["ddh_min_trigger_delta"],
+            ddh_target_delta=hc["ddh_target_delta"],
+            ddh_step_mode=hc["ddh_step_mode"],
+            ddh_step_size=hc["ddh_step_size"],
+            price_check_interval=hc["price_check_interval"],
+            min_hedge_usd=hc["min_hedge_usd"]
+        )
+
+        hedging_manager = HedgingManager(
+            portfolio_manager=portfolio_manager,
+            subscription_manager=subscription_manager,
+            deribit_client=deribit_client,
+            default_hedger_config=hedger_config
+        )
+
+        return portfolio_manager, subscription_manager, hedging_manager, deribit_client
 
     except Exception as e:
-        logger.error(f"Error creating {option_type.value} option: {e}", exc_info=True)
-        return None
+        logger.error(f"Error initializing managers: {e}")
+        raise
 
 
-async def initialize_usd_value_hedged_strangle(
-    deribit_client: DeribitWebsocketClient,
-    expiry: datetime,
-    current_price: float,
-    call_strike: float,
-    put_strike: float,
-    quantity: float = 2.0,
-    contract_type: ContractType = ContractType.INVERSE,
-) -> Portfolio:
-    """Initialize a portfolio with a strangle strategy.
+async def monitor_hedgers(hedging_manager: HedgingManager) -> None:
+    """Monitor and log hedger status."""
+    while not shutdown_event.is_set():
+        try:
+            # Get stats for all hedgers
+            stats = await hedging_manager.get_all_hedger_stats()
 
-    Args:
-        deribit_client: Initialized Deribit client
-        expiry: Option expiry datetime
-        current_price: Current price of the underlying
-        call_strike: Strike price for call option
-        put_strike: Strike price for put option
-        quantity: Number of contracts for each option
-        contract_type: Type of options contract (inverse or standard)
+            # Log status for each hedger
+            for portfolio_id, stat in stats.items():
+                if not stat:  # Skip if no stats
+                    continue
 
-    Returns:
-        Portfolio: Initialized portfolio with options
-    """
-    portfolio = Portfolio()
+                # Safely get values with defaults
+                current_delta = stat.get('current_delta', 0) or 0
+                hedge_count = stat.get('hedge_count', 0) or 0
+                last_hedge = stat.get('last_hedge_time')
 
-    # Get current futures price if available
-    futures_mark_price, _ = await deribit_client.get_instrument_mark_price_and_iv("BTC-PERPETUAL")
-    if futures_mark_price is not None:
-        current_price = futures_mark_price
-    logger.info(f"Using current price: ${current_price:,.2f}")
+                # Format the last hedge time
+                last_hedge_str = 'Never'
+                if last_hedge and last_hedge != 'None':
+                    try:
+                        # If it's a timestamp, format it nicely
+                        if isinstance(last_hedge, (int, float)) and last_hedge > 0:
+                            last_hedge_str = datetime.fromtimestamp(last_hedge).strftime('%Y-%m-%d %H:%M:%S')
+                        else:
+                            last_hedge_str = str(last_hedge)
+                    except (TypeError, ValueError):
+                        last_hedge_str = str(last_hedge)
 
-    # Create and add call option
-    call_option = await create_option(
-        deribit_client=deribit_client,
-        option_type=OptionType.CALL,
-        strike=call_strike,
-        expiry=expiry,
-        quantity=quantity,
-        contract_type=contract_type
-    )
+                logger.info(
+                    f"Portfolio {portfolio_id}: "
+                    f"Delta={current_delta:.4f} BTC, "
+                    f"Hedges={hedge_count}, "
+                    f"Last Hedge={last_hedge_str}"
+                )
 
-    if call_option:
-        call_price_btc, _ = await deribit_client.get_instrument_mark_price_and_iv(call_option.instrument_name)
-        if call_price_btc is not None:
-            call_usd_value = call_option.quantity * call_price_btc * current_price
-            portfolio.add_option(call_option, premium_usd=call_usd_value)
-            logger.info(f"Added call option: {call_option}")
-            logger.info(
-                f"Hedging USD value of call: {'Buy' if call_option.quantity > 0 else 'Sell'} "
-                f"${call_usd_value:,.2f} notional of BTC-PERPETUAL "
-                f"(price: {call_price_btc:.8f} BTC)"
-            )
+            # Wait before next update
+            await asyncio.sleep(10)  # Log every 10 seconds
 
-    # Create and add put option
-    put_option = await create_option(
-        deribit_client=deribit_client,
-        option_type=OptionType.PUT,
-        strike=put_strike,
-        expiry=expiry,
-        quantity=quantity,
-        contract_type=contract_type
-    )
-
-    if put_option:
-        put_price_btc, _ = await deribit_client.get_instrument_mark_price_and_iv(put_option.instrument_name)
-        if put_price_btc is not None:
-            put_usd_value = put_option.quantity * put_price_btc * current_price
-            portfolio.add_option(put_option, premium_usd=put_usd_value)
-            logger.info(f"Added put option: {put_option}")
-            logger.info(
-                f"Hedging USD value of put: {'Buy' if put_option.quantity > 0 else 'Sell'} "
-                f"${put_usd_value:,.2f} notional of BTC-PERPETUAL "
-                f"(price: {put_price_btc:.8f} BTC)"
-            )
-
-    # Calculate total USD hedge amount with correct sign
-    # If we sold options (positive premium), we need to buy USD hedge (positive notional)
-    # If we bought options (negative premium), we need to sell USD hedge (negative notional)
-    total_usd_hedge = 0.0
-    if call_option and call_price_btc is not None:
-        # For call options, premium is positive when sold, negative when bought
-        total_usd_hedge += call_usd_value
-    if put_option and put_price_btc is not None:
-        # For put options, premium is positive when sold, negative when bought
-        total_usd_hedge += put_usd_value
-
-    # Track initial USD hedge in portfolio
-    portfolio.initial_usd_hedged = True
-    portfolio.initial_usd_hedge_position = total_usd_hedge
-    portfolio.initial_usd_hedge_avg_entry = current_price
-    portfolio.last_hedge_price = current_price
-
-    logger.info(
-        f"Initial USD hedge: {'Buy' if total_usd_hedge > 0 else 'Sell'} "
-        f"${abs(total_usd_hedge):,.2f} notional at ${current_price:,.2f}"
-    )
-
-    return portfolio
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in monitor_hedgers: {e}")
+            await asyncio.sleep(5)  # Wait a bit before retrying
 
 
-async def save_portfolio(portfolio: Portfolio, filename: str) -> None:
-    """Save portfolio to file with error handling."""
+async def shutdown(
+    hedging_manager: HedgingManager,
+    deribit_client: DeribitWebsocketClient
+) -> None:
+    """Gracefully shutdown all components."""
+    logger.info("Shutting down...")
+
     try:
-        portfolio.save_to_file(filename)
-        logger.info(f"Portfolio saved to {filename}")
+        # Stop the hedging manager
+        if hedging_manager:
+            await hedging_manager.stop()
     except Exception as e:
-        logger.error(f"Error saving portfolio: {e}", exc_info=True)
+        logger.error(f"Error stopping hedging manager: {e}")
+
+    try:
+        # Close the Deribit client
+        if deribit_client:
+            await deribit_client.close()
+    except Exception as e:
+        logger.error(f"Error closing Deribit client: {e}")
+
+    logger.info("Shutdown complete")
 
 
 async def main():
@@ -190,139 +189,98 @@ async def main():
     logger.info("DNEUTRAL SNIPER started")
 
     # Initialize configuration
-    portfolio_file = CONFIG["portfolio_file"]
-    contract_type = ContractType.INVERSE if CONFIG["contract_type"].lower() == "inverse" else ContractType.STANDARD
-
     # Ensure underlying is uppercase for consistency
-    CONFIG["underlying"] = CONFIG["underlying"].upper()
+    DEFAULT_CONFIG["underlying"] = DEFAULT_CONFIG["underlying"].upper()
 
-    # Initialize Deribit client
-    credentials = None  # Add your credentials here if needed
-    deribit_client = DeribitWebsocketClient(credentials, is_test=CONFIG["deribit_testnet"])
+    # Initialize managers
+    portfolio_manager = None
+    subscription_manager = None
+    hedging_manager = None
+    deribit_client = None
 
     try:
-        await deribit_client.connect()
-        logger.info("Connected to Deribit API")
+        # Initialize all managers
+        portfolio_manager, subscription_manager, hedging_manager, deribit_client = \
+            await initialize_managers(DEFAULT_CONFIG)
 
-        # Load or create portfolio
-        portfolio_path = Path(portfolio_file)
-        if portfolio_path.exists():
-            try:
-                portfolio = Portfolio.load_from_file(portfolio_file)
-                logger.info(f"Loaded portfolio from {portfolio_file}")
-            except Exception as e:
-                logger.error(f"Error loading portfolio: {e}")
-                logger.info("Creating new portfolio...")
-                portfolio = await create_new_portfolio(deribit_client, contract_type)
-        else:
-            portfolio = await create_new_portfolio(deribit_client, contract_type)
+        # Start the hedging manager
+        await hedging_manager.start()
 
-        # Generate perpetual contract name based on underlying
-        def get_perpetual_contract(underlying: str) -> str:
-            """Generate perpetual contract name from underlying.
+        # Start monitoring task
+        monitor_task = asyncio.create_task(monitor_hedgers(hedging_manager))
 
-            Args:
-                underlying: The underlying asset (e.g., 'BTC', 'ETH')
+        logger.info("DNEUTRAL SNIPER is running. Press Ctrl+C to stop.")
 
-            Returns:
-                str: Formatted perpetual contract name (e.g., 'BTC-PERPETUAL')
-            """
-            # Extract base asset (e.g., 'BTC' from 'BTC-27JUN25')
-            base_asset = underlying.split('-')[0].upper()
-            return f"{base_asset}-PERPETUAL"
+        # Wait for shutdown signal
+        while not shutdown_event.is_set():
+            await asyncio.sleep(1)
 
-        # Get unique underlyings from portfolio options
-        underlyings = set()
-        if hasattr(portfolio, 'options') and portfolio.options:
-            for option in portfolio.options.values():
-                underlyings.add(option.underlying.split('-')[0].upper())
-
-        # Subscribe to perpetual contracts for all underlyings and all option instruments
-        instrument_names = set()
-        for underlying in underlyings or [CONFIG["underlying"]]:  # Fallback to config if no options
-            instrument_names.add(get_perpetual_contract(underlying))
-
-        # Add all option instruments
-        if hasattr(portfolio, 'options') and portfolio.options:
-            instrument_names.update(option.instrument_name for option in portfolio.options.values())
-
-        logger.debug(f"Generated instrument names for subscription: {instrument_names}")
-
-        logger.info(f"Subscribing to instruments: {', '.join(instrument_names)}")
-        await deribit_client.subscribe_to_instruments(instrument_names)
-
-        # Configure and start hedger
-        config = HedgerConfig(
-            ddh_min_trigger_delta=0.01,  # 1% of BTC delta
-            ddh_target_delta=0.0,       # Target neutral delta
-            ddh_step_mode="absolute",   # Use absolute price movement for triggers
-            ddh_step_size=100,          # $100 price movement to trigger check
-            underlying=CONFIG["underlying"],
-            instrument_name="BTC-PERPETUAL",
-            volatility=0.4,             # 40% annualized volatility (fallback IV)
-            risk_free_rate=0.0,         # 0% risk-free rate
-            min_hedge_usd=10.0,         # $10 minimum hedge size
-            price_check_interval=2.0    # Check every 2 seconds
-        )
-
-        hedger = DynamicDeltaHedger(config, portfolio, deribit_client)
-
+        # Cancel monitoring task
+        monitor_task.cancel()
         try:
-            logger.info("Starting dynamic delta hedger...")
-            await hedger.start()
+            await monitor_task
         except asyncio.CancelledError:
-            logger.info("Received shutdown signal, stopping...")
-            raise
-        except Exception as e:
-            logger.error(f"Error in hedger: {e}", exc_info=True)
-            raise
+            pass
 
     except asyncio.CancelledError:
-        logger.info("Shutdown requested...")
+        logger.info("Received shutdown signal")
     except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
+        logger.error(f"Error in main loop: {e}", exc_info=True)
     finally:
-        # Ensure clean shutdown
-        try:
-            if 'hedger' in locals() and hasattr(hedger, 'stop'):
-                await hedger.stop()
-            if 'portfolio' in locals():
-                await save_portfolio(portfolio, portfolio_file)
-            if 'deribit_client' in locals() and hasattr(deribit_client, 'close'):
-                await deribit_client.close()
-        except Exception as e:
-            logger.error(f"Error during shutdown: {e}", exc_info=True)
-
+        # Graceful shutdown
+        await shutdown(hedging_manager, deribit_client)
         logger.info("DNEUTRAL SNIPER stopped")
 
 
 async def create_new_portfolio(
+    portfolio_manager: PortfolioManager,
     deribit_client: DeribitWebsocketClient,
-    contract_type: ContractType
-) -> Portfolio:
-    """Create a new portfolio with default options."""
-    expiry = datetime.fromisoformat(CONFIG["expiry_date"])
-    current_price = 105800  # Will be updated from market data
+    underlying: str = "BTC",
+    initial_balance: float = 10000.0
+) -> str:
+    """Create a new portfolio with the specified parameters.
 
-    portfolio = await initialize_usd_value_hedged_strangle(
-        deribit_client=deribit_client,
-        expiry=expiry,
-        current_price=current_price,
-        call_strike=CONFIG["call_strike"],
-        put_strike=CONFIG["put_strike"],
-        quantity=CONFIG["option_quantity"],
-        contract_type=contract_type
-    )
+    Args:
+        portfolio_manager: Initialized PortfolioManager instance
+        deribit_client: Initialized Deribit client
+        underlying: The underlying asset (e.g., "BTC" or "ETH")
+        initial_balance: Initial balance in USD
 
-    return portfolio
+    Returns:
+        str: ID of the created portfolio
+    """
+    # Generate a unique portfolio ID
+    portfolio_id = f"{underlying.lower()}_{int(datetime.utcnow().timestamp())}"
+
+    try:
+        # Create the portfolio
+        await portfolio_manager.create_portfolio(
+            portfolio_id=portfolio_id,
+            underlying=underlying,
+            initial_balance=initial_balance
+        )
+
+        logger.info(f"Created new portfolio: {portfolio_id}")
+        return portfolio_id
+
+    except Exception as e:
+        logger.error(f"Error creating portfolio: {e}")
+        raise
+
 
 if __name__ == "__main__":
     try:
+        # Set up event loop policy for Windows compatibility
+        if sys.platform == 'win32':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+        # Run the main application
         asyncio.run(main())
+
     except KeyboardInterrupt:
         logger.info("Shutdown requested by user")
     except Exception as e:
-        logger.critical(f"Unhandled exception: {e}", exc_info=True)
-        raise
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
     finally:
-        logger.info("Application shutdown complete")
+        logger.info("Application terminated")

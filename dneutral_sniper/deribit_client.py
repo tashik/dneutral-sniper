@@ -2,7 +2,7 @@ import websockets
 import json
 import asyncio
 import logging
-from typing import Optional, Callable, Dict
+from typing import Optional, Callable, Dict, Any
 from dataclasses import dataclass
 import itertools
 import time
@@ -10,11 +10,13 @@ import traceback
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class DeribitCredentials:
     client_id: str
     client_secret: str
     test: bool = True
+
 
 class DeribitWebsocketClient:
     # ...
@@ -34,6 +36,7 @@ class DeribitWebsocketClient:
         self._sub_ws_recv_lock = asyncio.Lock()  # Enforce single-consumer recv for sub_ws
         self.subscribed_instruments = set()  # Track all currently subscribed instruments
         self.price_iv_cache = {}  # instrument_name -> {"mark_price": float, "iv": float}
+        self._subscription_handlers = set()  # Set of handlers to notify about subscription confirmations
 
     def get_price_iv(self, instrument_name: str):
         """Return (mark_price, iv) for the instrument from cache, or (None, None) if not available."""
@@ -46,23 +49,86 @@ class DeribitWebsocketClient:
         """
         Subscribe to a set of instrument tickers (options or futures).
         Avoid duplicate subscriptions using self.subscribed_instruments.
+
+        Args:
+            instrument_names: List of instrument names to subscribe to
+
+        Returns:
+            bool: True if all subscriptions were successful, False otherwise
         """
+        if not self.sub_ws:
+            logger.error("Cannot subscribe: WebSocket connection is not active")
+            return False
+
         new_instruments = set(instrument_names) - self.subscribed_instruments
         if not new_instruments:
-            return
+            logger.debug("No new instruments to subscribe to")
+            return True
+
         channels = [f"ticker.{name}.100ms" for name in new_instruments]
+        subscription_id = next(self._id_counter)
         subscribe_params = {
             "jsonrpc": "2.0",
             "method": "public/subscribe",
-            "id": 42,
+            "id": subscription_id,
             "params": {"channels": channels}
         }
-        await asyncio.sleep(0.5)
-        await self.sub_ws.send(json.dumps(subscribe_params))
-        logger.info(f"Subscribed to tickers: {channels}")
-        self.subscribed_instruments.update(new_instruments)
 
+        logger.info(f"Sending subscription request for channels: {channels}")
 
+        try:
+            # Create a future to track the subscription response
+            subscription_future = asyncio.get_running_loop().create_future()
+            self.pending_requests[subscription_id] = subscription_future
+
+            # Send the subscription request
+            await self.sub_ws.send(json.dumps(subscribe_params))
+            logger.debug(f"Sent subscription request: {subscribe_params}")
+
+            # Wait for the subscription response with a timeout
+            try:
+                response = await asyncio.wait_for(subscription_future, timeout=5.0)
+            except asyncio.TimeoutError:
+                response = await asyncio.wait_for(subscription_future, timeout=5.0)
+            logger.debug(f"Received subscription response: {response}")
+            
+            # Check if response is a dictionary with a result field
+            if isinstance(response, dict) and "result" in response:
+                result = response["result"]
+                
+                # Case 1: Result is a list of channels (e.g., ["ticker.BTC-PERPETUAL.100ms"])
+                if isinstance(result, list) and all(isinstance(x, str) for x in result):
+                    self.subscribed_instruments.update(new_instruments)
+                    logger.info(f"Successfully subscribed to instruments: {new_instruments}")
+                    return True
+                    
+                # Case 2: Result is a dictionary with a channels field
+                elif isinstance(result, dict) and "channels" in result:
+                    channels = result["channels"]
+                    if isinstance(channels, list) and len(channels) == len(new_instruments):
+                        self.subscribed_instruments.update(new_instruments)
+                        logger.info(f"Successfully subscribed to instruments: {new_instruments}")
+                        return True
+            
+            # Handle case where response is a list (shouldn't happen with current API but just in case)
+            elif isinstance(response, list) and len(response) > 0 and isinstance(response[0], dict):
+                if "result" in response[0]:
+                    self.subscribed_instruments.update(new_instruments)
+                    logger.info(f"Successfully subscribed to instruments: {new_instruments}")
+                    return True
+            
+            logger.error(f"Unexpected subscription response: {response}")
+            return False
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout waiting for subscription confirmation for {channels}")
+            return False
+
+        except Exception as e:
+            logger.error(f"Error subscribing to instruments {new_instruments}: {e}", exc_info=True)
+            return False
+        finally:
+            # Clean up the future
+            self.pending_requests.pop(subscription_id, None)
 
     TESTNET_WS_URL = "wss://test.deribit.com/ws/api/v2"
     MAINNET_WS_URL = "wss://www.deribit.com/ws/api/v2"
@@ -160,7 +226,11 @@ class DeribitWebsocketClient:
                     if not fut.done():
                         fut.set_result(data)
                 backoff = 1
-            except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedError, websockets.exceptions.ConnectionClosedOK) as e:
+            except (
+                websockets.exceptions.ConnectionClosed,
+                websockets.exceptions.ConnectionClosedError,
+                websockets.exceptions.ConnectionClosedOK
+            ) as e:
                 logger.error(f"req_ws closed: {e}. Attempting to reconnect in {backoff}s...")
                 await asyncio.sleep(backoff)
                 await self.reconnect()
@@ -186,7 +256,11 @@ class DeribitWebsocketClient:
                 except asyncio.TimeoutError:
                     logger.warning("No message received on sub_ws after 10 seconds!")
                     continue
-            except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedError, websockets.exceptions.ConnectionClosedOK) as e:
+            except (
+                websockets.exceptions.ConnectionClosed,
+                websockets.exceptions.ConnectionClosedError,
+                websockets.exceptions.ConnectionClosedOK
+            ) as e:
                 logger.error(f"sub_ws closed: {e}. Attempting to reconnect in {backoff}s...")
                 await asyncio.sleep(backoff)
                 await self.reconnect()
@@ -220,23 +294,26 @@ class DeribitWebsocketClient:
         if self.sub_ws:
             await self.sub_ws.close()
 
-    async def send_request(self, method: str, params: dict) -> dict:
-        """Send JSON-RPC request and await response via listener"""
-        req_id = next(self._id_counter)
-        request = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": method,
-            "params": params
-        }
-        fut = asyncio.get_running_loop().create_future()
-        self.pending_requests[req_id] = fut
-        await self.req_ws.send(json.dumps(request))
+    async def get_index_price(self, index_name: str = "btc_usd") -> Optional[float]:
+        """Get the current index price for the given index.
+
+        Args:
+            index_name: Name of the index (e.g., 'btc_usd')
+
+        Returns:
+            float: The current index price, or None if the request fails
+        """
         try:
-            response = await asyncio.wait_for(fut, timeout=10)
-            return response
-        finally:
-            self.pending_requests.pop(req_id, None)
+            result = await self.send_request(
+                "public/get_index_price",
+                {"index_name": index_name}
+            )
+            if result and "result" in result and "index_price" in result["result"]:
+                return float(result["result"]["index_price"])
+            return None
+        except Exception as e:
+            logger.error(f"Error getting index price: {e}")
+            return None
 
     async def get_instrument_mark_price_and_iv(self, instrument_name: str, force_refresh: bool = False) -> tuple:
         """
@@ -293,23 +370,230 @@ class DeribitWebsocketClient:
             await self.reconnect()
             return None, 0.0
 
-    def set_price_callback(self, callback: Callable[[str, float], None]):
-        """Set callback for price updates"""
+    def set_price_callback(self, callback):
+        """Set callback for price updates.
+
+        The callback can be either a synchronous function or a coroutine function.
+        """
+        if not callable(callback):
+            raise ValueError("Callback must be callable")
         self.price_callback = callback
 
-    async def _handle_message(self, message: Dict):
-        """Handle incoming WebSocket messages"""
-        if message.get("method") == "subscription":
-            data = message.get("params", {}).get("data", {})
-            if "ticker" in message.get("params", {}).get("channel", ""):
-                instrument_name = data.get("instrument_name")
-                mark_price = data.get("mark_price")
-                mark_iv = data.get("mark_iv")
-                # Update cache
-                iv = None
-                if mark_iv is not None:
-                    iv = mark_iv / 100 if mark_iv > 3 else mark_iv
-                # logger.info(f"[DEBUG] Ticker update: {instrument_name}, mark_price={mark_price}, mark_iv={mark_iv}, iv={iv}")
-                self.price_iv_cache[instrument_name] = {"mark_price": mark_price, "iv": iv}
-                if self.price_callback and mark_price is not None:
-                    self.price_callback(instrument_name, mark_price)
+    async def _handle_message(self, message: Dict[str, Any]) -> None:
+        """Handle incoming WebSocket messages.
+
+        This method processes different types of WebSocket messages:
+        1. List responses (subscription confirmations)
+        2. Dictionary responses (pending requests, subscription updates)
+        3. Error responses
+        """
+        try:
+            logger.debug(f"[WEBSOCKET] Received message: {message}")
+
+            # Handle list responses (subscription confirmations)
+            if isinstance(message, list):
+                if message and len(message) > 0:
+                    # Assume first element contains subscription info
+                    sub_info = message[0]
+                    if isinstance(sub_info, dict) and "result" in sub_info and "channels" in sub_info["result"]:
+                        channels = sub_info["result"]["channels"]
+                        for channel in channels:
+                            if channel.startswith("ticker."):
+                                instrument = channel.split('.')[1]
+                                self._notify_subscription_handlers(instrument)
+                return
+
+            # Handle dictionary responses
+            if not isinstance(message, dict):
+                logger.warning(f"[WEBSOCKET] Received unexpected message type: {type(message)}")
+                return
+
+            # Check if this is a response to a pending request
+            if "id" in message and message.get("id") in self.pending_requests:
+                request_id = message["id"]
+                future = self.pending_requests.get(request_id)
+                if future and not future.done():
+                    if "error" in message:
+                        error = message["error"]
+                        logger.error(f"Error in WebSocket response (id={request_id}): {error}")
+                        future.set_exception(Exception(f"WebSocket error: {error}"))
+                    else:
+                        future.set_result(message)
+                return
+
+            # Handle subscription confirmations
+            if "result" in message and "channels" in message.get("result", {}):
+                channels = message["result"]["channels"]
+                for channel in channels:
+                    if channel.startswith("ticker."):
+                        instrument = channel.split('.')[1]
+                        logger.info(f"[WEBSOCKET] Subscription confirmed for {instrument}")
+                        # Notify all subscription handlers
+                        for handler in list(self._subscription_handlers):
+                            try:
+                                if asyncio.iscoroutinefunction(handler):
+                                    asyncio.create_task(handler(instrument))
+                                else:
+                                    handler(instrument)
+                            except Exception as e:
+                                logger.error(f"Error in subscription handler: {e}", exc_info=True)
+
+            # Handle subscription updates
+            elif "method" in message and message["method"] == "subscription":
+                params = message.get("params", {})
+                channel = params.get("channel", "")
+                data = params.get("data", {})
+
+                if not channel:
+                    logger.warning("[WEBSOCKET] Received subscription message without channel")
+                    return
+
+                logger.debug(f"[WEBSOCKET] Processing subscription update - Channel: {channel}")
+
+                # Route to appropriate handler based on channel type
+                if channel.startswith("ticker."):
+                    await self._handle_ticker_update(channel, data)
+                elif channel.startswith("book."):
+                    await self._handle_order_book_update(channel, data)
+                elif channel.startswith("trades."):
+                    await self._handle_trade_update(channel, data)
+                else:
+                    logger.debug(f"[WEBSOCKET] Unhandled subscription channel: {channel}")
+
+        except Exception as e:
+            logger.error(f"[WEBSOCKET] Error handling WebSocket message: {e}", exc_info=True)
+
+    async def _handle_sub_message(self, message: Dict[str, Any]) -> None:
+        """Legacy handler for incoming subscription messages.
+
+        This is kept for backward compatibility but most logic has been moved to _handle_message.
+        """
+        try:
+            logger.debug(f"[WEBSOCKET] Received legacy sub message: {message}")
+            # Just forward to _handle_message for processing
+            await self._handle_message(message)
+        except Exception as e:
+            logger.error(f"Error in _handle_sub_message: {e}", exc_info=True)
+
+    def add_subscription_handler(self, handler: Callable[[str], None]) -> None:
+        """Add a handler to be called when a subscription is confirmed.
+
+        Args:
+            handler: A coroutine function that takes an instrument name as argument
+        """
+        self._subscription_handlers.add(handler)
+
+    def remove_subscription_handler(self, handler: Callable[[str], None]) -> None:
+        """Remove a subscription handler."""
+        self._subscription_handlers.discard(handler)
+
+    async def _handle_ticker_update(self, channel: str, data: Dict[str, Any]) -> None:
+        """Handle ticker subscription updates."""
+        if not data:
+            logger.debug("[WEBSOCKET] No data in ticker update")
+            return
+
+        try:
+            instrument = channel.split(".")[1] if "." in channel else "unknown"
+
+            # Extract price - prioritize mark_price, fall back to last_price
+            mark_price = data.get("mark_price")
+            if mark_price is None:
+                mark_price = data.get("last_price")
+                if mark_price is None:
+                    logger.debug(f"[WEBSOCKET] No price data in ticker update for {instrument}")
+                    return
+
+            mark_price = float(mark_price)
+            logger.debug(f"[WEBSOCKET] Ticker update - {instrument}: {mark_price}")
+
+            # Update price/IV cache
+            mark_iv = data.get("mark_iv")
+            iv = mark_iv / 100 if mark_iv and mark_iv > 3 else (mark_iv if mark_iv else 0.0)
+
+            self.price_iv_cache[instrument] = {
+                "mark_price": mark_price,
+                "iv": iv,
+                "timestamp": time.time()
+            }
+
+            # Dispatch to price callback if set
+            if self.price_callback:
+                try:
+                    if asyncio.iscoroutinefunction(self.price_callback):
+                        await self.price_callback(instrument, mark_price)
+                    else:
+                        self.price_callback(instrument, mark_price)
+                except Exception as e:
+                    logger.error(f"[WEBSOCKET] Error in price callback: {e}", exc_info=True)
+
+        except Exception as e:
+            logger.error(f"[WEBSOCKET] Error processing ticker update: {e}", exc_info=True)
+
+    async def _handle_order_book_update(self, channel: str, data: Dict[str, Any]) -> None:
+        """Handle order book subscription updates."""
+        if not self.price_callback:
+            return
+
+        try:
+            instrument = channel.split(".")[1] if "." in channel else "unknown"
+            if not data or "bids" not in data or "asks" not in data or not data["bids"] or not data["asks"]:
+                logger.debug(f"[WEBSOCKET] Incomplete order book data for {instrument}")
+                return
+
+            bid = float(data["bids"][0][0])
+            ask = float(data["asks"][0][0])
+            mid_price = (bid + ask) / 2
+
+            logger.debug(f"[WEBSOCKET] Order book update - {instrument}: {mid_price} (bid: {bid}, ask: {ask})")
+
+            # Update price cache (without IV for order book updates)
+            if instrument in self.price_iv_cache:
+                self.price_iv_cache[instrument]["mark_price"] = mid_price
+                self.price_iv_cache[instrument]["timestamp"] = time.time()
+
+            # Dispatch to price callback if set
+            if self.price_callback:
+                try:
+                    if asyncio.iscoroutinefunction(self.price_callback):
+                        await self.price_callback(instrument, mid_price)
+                    else:
+                        self.price_callback(instrument, mid_price)
+                except Exception as e:
+                    logger.error(f"[WEBSOCKET] Error in order book callback: {e}", exc_info=True)
+
+        except Exception as e:
+            logger.error(f"[WEBSOCKET] Error processing order book update: {e}", exc_info=True)
+
+    async def _handle_trade_update(self, channel: str, data: Dict[str, Any]) -> None:
+        """Handle trade subscription updates."""
+        if not self.price_callback:
+            return
+
+        try:
+            instrument = channel.split(".")[1] if "." in channel else "unknown"
+            trades = data if isinstance(data, list) else [data]
+            if not trades or "price" not in trades[0]:
+                logger.debug(f"[WEBSOCKET] No trade data in update for {instrument}")
+                return
+
+            price = float(trades[0]["price"])
+            logger.debug(f"[WEBSOCKET] Trade update - {instrument}: {price}")
+
+            # Update price cache (without IV for trade updates)
+            if instrument in self.price_iv_cache:
+                self.price_iv_cache[instrument]["mark_price"] = price
+                self.price_iv_cache[instrument]["timestamp"] = time.time()
+
+            # Dispatch to price callback if set
+            if self.price_callback:
+                try:
+                    if asyncio.iscoroutinefunction(self.price_callback):
+                        await self.price_callback(instrument, price)
+                    else:
+                        self.price_callback(instrument, price)
+                except Exception as e:
+                    logger.error(f"[WEBSOCKET] Error in trade callback: {e}", exc_info=True)
+
+        except Exception as e:
+            logger.error(f"[WEBSOCKET] Error processing trade update: {e}", exc_info=True)

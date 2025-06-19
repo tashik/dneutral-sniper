@@ -1,15 +1,14 @@
-from dataclasses import dataclass
-from typing import Optional, Dict, Tuple
+from typing import Tuple
 import numpy as np
 from datetime import datetime
 from scipy.stats import norm
 from dneutral_sniper.portfolio import Portfolio
 from dneutral_sniper.models import OptionType, VanillaOption, ContractType
 import logging
-from decimal import Decimal, ROUND_HALF_UP
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 class BlackScholesModel:
     @staticmethod
@@ -31,6 +30,7 @@ class BlackScholesModel:
             return float(norm.cdf(d1))
         else:
             return float(norm.cdf(d1) - 1)
+
 
 class OptionModel:
     def __init__(self, portfolio: Portfolio, deribit_client=None):
@@ -90,6 +90,7 @@ class OptionModel:
         if option.contract_type == ContractType.INVERSE:
             delta = bs_delta - mark_price
         else:
+            # For standard options, delta is in USD terms
             delta = bs_delta
         return delta
 
@@ -108,7 +109,13 @@ class OptionModel:
             # For standard options, value is already in USD
             return mark_price * option.quantity
 
-    async def calculate_portfolio_net_delta(self, current_price: float, volatility: float, risk_free_rate: float = 0.0, include_static_hedge: bool = False) -> float:
+    async def calculate_portfolio_net_delta(
+        self,
+        current_price: float,
+        volatility: float,
+        risk_free_rate: float = 0.0,
+        include_static_hedge: bool = False
+    ) -> float:
         """
         Calculate true portfolio net delta in BTC.
 
@@ -130,7 +137,6 @@ class OptionModel:
         Returns:
             float: Net delta in BTC
         """
-        from datetime import datetime
         current_time = datetime.now()
         options = self.portfolio.list_options()
 
@@ -162,7 +168,8 @@ class OptionModel:
 
             # Calculate position delta in BTC
             if option.contract_type == ContractType.INVERSE:
-                # For inverse options, delta is already in BTC
+                # For inverse options, delta is (bs_delta - mark_price)
+                # This gives us the delta in BTC terms already
                 position_delta_btc = delta * option.quantity
             else:
                 # For standard options, convert USD delta to BTC delta
@@ -179,15 +186,17 @@ class OptionModel:
             )
 
         # Add dynamic futures hedge (already in BTC)
-        dynamic_hedge_btc = getattr(self.portfolio, 'futures_position', 0.0) / current_price if current_price > 0 else 0.0
+        fut_pos = getattr(self.portfolio, 'futures_position', 0.0)
+        dynamic_hedge_btc = fut_pos / current_price if current_price > 0 else 0.0
         total_net_delta_btc += dynamic_hedge_btc
 
         # Optionally add static hedge if requested
         if include_static_hedge:
-            static_hedge_btc = getattr(self.portfolio, 'initial_usd_hedge_position', 0.0) / current_price if current_price > 0 else 0.0
+            hedge_pos = getattr(self.portfolio, 'initial_usd_hedge_position', 0.0)
+            static_hedge_btc = hedge_pos / current_price if current_price > 0 else 0.0
             total_net_delta_btc += static_hedge_btc
             logger.info(f"Including static hedge in delta: {static_hedge_btc:.6f} BTC")
-        
+
         logger.info(f"Dynamic futures hedge (BTC): {dynamic_hedge_btc:.6f}")
         logger.info(f"Portfolio net delta (BTC): {total_net_delta_btc:.6f}")
 
@@ -215,7 +224,9 @@ class OptionModel:
                 continue
 
             # Get initial USD value if available
-            initial_value = self.portfolio.initial_option_usd_value.get(option.instrument_name, 0.0)
+            initial_value = self.portfolio.initial_option_usd_value.get(option.instrument_name, [0.0, 0.0])
+            # initial_value is [target_usd_value, actual_usd_value], we use actual_usd_value (index 1) for PNL calculation
+            initial_value = initial_value[1] if isinstance(initial_value, (list, tuple)) and len(initial_value) > 1 else 0.0
 
             # Calculate current USD value
             if option.contract_type == ContractType.INVERSE:

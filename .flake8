@@ -1,0 +1,20 @@
+[flake8]
+max-line-length = 120
+exclude = 
+    .git,
+    __pycache__,
+    venv,
+    build,
+    dist,
+    tests/*
+per-file-ignores =
+    # Ignore E501 (line too long) for __init__.py
+    __init__.py: E501
+    # Ignore E402 (module level import not at top of file) for __init__.py
+    __init__.py: E402
+    # Ignore F401 (imported but unused) for __init__.py
+    __init__.py: F401
+    # Ignore E203 (whitespace before ':') as it conflicts with black
+    *.py: E203
+    # Ignore W503 (line break before binary operator) as it conflicts with black
+    *.py: W503

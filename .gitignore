@@ -1,8 +1,11 @@
 .venv/
 __pycache__
+.pytest_cache/
 portfolio.json
 pnl_chart.png
 .vscode/
 *.log
 *.png
 *.pyc
+data/*
+test_data/*

@@ -3,13 +3,16 @@ from enum import Enum
 from datetime import datetime
 from typing import Optional
 
+
 class OptionType(Enum):
     CALL = "call"
     PUT = "put"
 
+
 class ContractType(Enum):
     INVERSE = "inverse"  # Settled in BTC, quoted in USD (e.g., BTC-28JUN24-60000-C)
     STANDARD = "standard"  # Settled in USD, quoted in USD (e.g., BTC-28JUN24-60000C)
+
 
 @dataclass
 class VanillaOption:

@@ -1,0 +1,18 @@
+{
+  "portfolios_dir": "portfolios",
+  "underlying": "BTC",
+  "deribit_testnet": true,
+  "deribit_credentials": {
+    "key": "YOUR_API_KEY",
+    "secret": "YOUR_API_SECRET",
+    "testnet": true
+  },
+  "hedger_config": {
+    "ddh_min_trigger_delta": 0.01,
+    "ddh_target_delta": 0.0,
+    "ddh_step_mode": "percentage",
+    "ddh_step_size": 0.01,
+    "price_check_interval": 2.0,
+    "min_hedge_usd": 10.0
+  }
+}
