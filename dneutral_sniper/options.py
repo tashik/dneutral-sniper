@@ -1,6 +1,6 @@
 from typing import Tuple
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 from scipy.stats import norm
 from dneutral_sniper.portfolio import Portfolio
 from dneutral_sniper.models import OptionType, VanillaOption, ContractType
@@ -137,13 +137,17 @@ class OptionModel:
         Returns:
             float: Net delta in BTC
         """
-        current_time = datetime.now()
+        current_time = datetime.now(timezone.utc)
         options = self.portfolio.list_options()
 
         total_net_delta_btc = 0.0
         total_usd_value = 0.0
 
         for option in options:
+            # Ensure expiry is timezone-aware (should be handled by VanillaOption.__post_init__)
+            if option.expiry.tzinfo is None:
+                option.expiry = option.expiry.replace(tzinfo=timezone.utc)
+
             time_to_expiry = (option.expiry - current_time).total_seconds() / (365 * 24 * 3600)
 
             # Get mark price and IV
@@ -185,10 +189,8 @@ class OptionModel:
                 f"usd_value={usd_value:.2f}, position_delta_btc={position_delta_btc:.6f}"
             )
 
-        # Add dynamic futures hedge (already in BTC)
-        fut_pos = getattr(self.portfolio, 'futures_position', 0.0)
-        dynamic_hedge_btc = fut_pos / current_price if current_price > 0 else 0.0
-        total_net_delta_btc += dynamic_hedge_btc
+        # Note: Dynamic futures hedge is handled by the caller (DynamicDeltaHedger._calculate_and_update_delta)
+        # to avoid double-counting
 
         # Optionally add static hedge if requested
         if include_static_hedge:
@@ -197,7 +199,6 @@ class OptionModel:
             total_net_delta_btc += static_hedge_btc
             logger.info(f"Including static hedge in delta: {static_hedge_btc:.6f} BTC")
 
-        logger.info(f"Dynamic futures hedge (BTC): {dynamic_hedge_btc:.6f}")
         logger.info(f"Portfolio net delta (BTC): {total_net_delta_btc:.6f}")
 
         return total_net_delta_btc
@@ -220,7 +221,7 @@ class OptionModel:
         # Calculate PNL from options
         for option in self.portfolio.list_options():
             mark_price, _ = await self._get_mark_price_and_iv(option)
-            if mark_price is None:
+            if mark_price is None or option.quantity == 0 or mark_price == 0:
                 continue
 
             # Get initial USD value if available

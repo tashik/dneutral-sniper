@@ -437,6 +437,9 @@ def test_monitor(runner, mock_managers):
 @pytest.mark.asyncio
 async def test_shutdown_handling():
     """Test that shutdown cleans up resources properly."""
+    # Create a mock logger to verify log messages
+    mock_logger = MagicMock()
+    
     # Create mock managers with proper async methods
     mock_deribit = AsyncMock()
     mock_portfolio = AsyncMock()
@@ -460,19 +463,22 @@ async def test_shutdown_handling():
         'hedging': mock_hedging
     }
     
-    # Create a future that's already done to avoid unawaited coroutine warnings
-    done_future = asyncio.Future()
-    done_future.set_result(None)
-    
-    # Patch the managers dictionary and call shutdown
+    # Patch the managers dictionary, logger, and call shutdown
     with patch('dneutral_sniper.cli.managers', mock_managers), \
-         patch('dneutral_sniper.cli.initialize_managers', return_value=done_future) as mock_init_managers:
+         patch('dneutral_sniper.cli.logger', mock_logger), \
+         patch('dneutral_sniper.cli.initialize_managers', AsyncMock(return_value=None)) as mock_init_managers:
         
         # Call shutdown
+        from dneutral_sniper.cli import shutdown
         await shutdown()
         
         # Verify cleanup methods were called
         mock_hedging.stop.assert_awaited_once()
+        mock_deribit.close.assert_awaited_once()
+        
+        # Verify log messages
+        mock_logger.info.assert_any_call("Shutting down...")
+        mock_logger.info.assert_any_call("Shutdown complete")
         mock_deribit.close.assert_awaited_once()
 
 def test_config_loading(runner, temp_config, mock_managers):

@@ -136,40 +136,78 @@ class TestHedgingManager:
             patch('dneutral_sniper.hedging_manager.DynamicDeltaHedger', return_value=mock_hedger) as mock_hedger_cls
         ):
             try:
-                # Add a hedger
-                await hedging_manager._add_hedger(portfolio_id)
+                print("1. Starting test: Adding hedger...")
+                # Add a hedger with timeout
+                try:
+                    await asyncio.wait_for(
+                        hedging_manager._add_hedger(portfolio_id),
+                        timeout=5.0
+                    )
+                    print("2. Successfully added hedger")
+                except asyncio.TimeoutError:
+                    pytest.fail("Timeout while adding hedger")
 
                 # Verify the hedger was created and start was called
                 mock_hedger_cls.assert_called_once()
                 mock_hedger.start.assert_called_once()
+                print("3. Verified hedger creation and start")
 
                 # Verify the hedger is in the manager
                 assert portfolio_id in hedging_manager.hedgers
                 assert hedging_manager.hedgers[portfolio_id].hedger is mock_hedger
+                print("4. Verified hedger in manager")
 
                 # Get the monitoring task
                 task = hedging_manager.hedgers[portfolio_id].task
                 assert task is not None
                 assert not task.done()
+                print("5. Verified monitoring task")
 
                 # Test adding the same hedger again (should be idempotent)
+                print("6. Testing idempotent add...")
                 initial_task = hedging_manager.hedgers[portfolio_id].task
-                await hedging_manager._add_hedger(portfolio_id)
+                await asyncio.wait_for(
+                    hedging_manager._add_hedger(portfolio_id),
+                    timeout=5.0
+                )
                 assert hedging_manager.hedgers[portfolio_id].task is initial_task  # Same task, not replaced
                 mock_hedger.start.assert_called_once()  # Still only called once
+                print("7. Verified idempotent add")
 
                 # Remove the hedger
-                await hedging_manager._remove_hedger(portfolio_id)
+                print("8. Removing hedger...")
+                try:
+                    await asyncio.wait_for(
+                        hedging_manager._remove_hedger(portfolio_id),
+                        timeout=5.0
+                    )
+                    print("9. Successfully removed hedger")
+                except asyncio.TimeoutError:
+                    pytest.fail("Timeout while removing hedger")
+                
                 assert portfolio_id not in hedging_manager.hedgers
                 mock_hedger.stop.assert_called_once()
+                print("10. Verified hedger removal")
 
                 # Test removing non-existent hedger (should not raise)
+                print("11. Testing removal of non-existent hedger...")
                 await hedging_manager._remove_hedger("non_existent_portfolio")
+                print("12. Successfully handled non-existent hedger removal")
 
+            except Exception as e:
+                print(f"Test failed with error: {str(e)}")
+                raise
             finally:
                 # Ensure cleanup in case of test failure
                 if hasattr(hedging_manager, 'hedgers') and portfolio_id in hedging_manager.hedgers:
-                    await hedging_manager._remove_hedger(portfolio_id)
+                    print("Cleaning up test...")
+                    try:
+                        await asyncio.wait_for(
+                            hedging_manager._remove_hedger(portfolio_id),
+                            timeout=5.0
+                        )
+                    except (asyncio.TimeoutError, Exception) as e:
+                        print(f"Cleanup warning: {str(e)}")
 
     @pytest.mark.asyncio
     async def test_monitor_portfolios(self, hedging_manager, portfolio_manager):

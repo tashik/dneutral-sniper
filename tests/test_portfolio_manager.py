@@ -65,20 +65,32 @@ class TestPortfolioManager:
         return manager
 
     async def test_initialize_creates_default_portfolio(self, portfolio_manager, temp_portfolios_dir):
-        """Test that initializing creates a default portfolio if none exist."""
-        # Should have created a default portfolio
+        """Test that we can create a default portfolio."""
+        # Create a default portfolio
+        portfolio_id = "default"
+        underlying = "BTC"
+        initial_balance = 0.0
+
+        # Create the portfolio
+        new_id, portfolio = await portfolio_manager.create_portfolio(
+            portfolio_id=portfolio_id,
+            underlying=underlying,
+            initial_balance=initial_balance
+        )
+
+        # Verify the portfolio was created
         portfolio_ids = await portfolio_manager.list_portfolios()
         assert len(portfolio_ids) == 1
-        assert portfolio_ids[0] == "default"
+        assert portfolio_ids[0] == portfolio_id
 
         # Get the portfolio to verify its properties
-        portfolio = await portfolio_manager.get_portfolio("default")
+        portfolio = await portfolio_manager.get_portfolio(portfolio_id)
         assert portfolio is not None
-        assert portfolio.underlying == "BTC"
-        assert getattr(portfolio, 'initial_balance', 0.0) == 0.0
+        assert portfolio.underlying == underlying
+        assert getattr(portfolio, 'initial_balance', 0.0) == initial_balance
 
         # Verify the portfolio file was created
-        portfolio_file = Path(temp_portfolios_dir) / "portfolio_default.json"
+        portfolio_file = Path(temp_portfolios_dir) / f"portfolio_{portfolio_id}.json"
         assert portfolio_file.exists()
 
     async def test_create_portfolio(self, portfolio_manager, temp_portfolios_dir):

@@ -40,10 +40,8 @@ class SubscriptionManager:
         self.deribit_client = deribit_client
         # Track all subscribed instruments across all portfolios
         self._all_subscribed_instruments: Set[str] = set()
-        # Track pending subscription confirmations
-        self._pending_subscriptions: Set[str] = set()
-        # Event triggered when a subscription is confirmed
-        self._subscription_confirmed = asyncio.Event()
+        # Track pending subscription confirmations and their events
+        self._pending_subscriptions: Dict[str, asyncio.Event] = {}
 
     async def add_subscription(
         self, portfolio_id: str, instrument: str, wait_for_confirmation: bool = False
@@ -85,17 +83,19 @@ class SubscriptionManager:
             if self.deribit_client and is_new_instrument:
                 try:
                     logger.info("Subscribing to instrument: %s", instrument)
-                    self._subscription_confirmed.clear()
-                    self._pending_subscriptions.add(instrument)
+                    
+                    # Create a new event for this subscription
+                    sub_event = asyncio.Event()
+                    self._pending_subscriptions[instrument] = sub_event
                     
                     # Subscribe and wait for confirmation if requested
                     success = await self.deribit_client.subscribe_to_instruments([instrument])
                     
-                    if wait_for_confirmation:
+                    if wait_for_confirmation and success:
                         logger.debug("Waiting for subscription confirmation for %s", instrument)
                         try:
                             # Wait for confirmation with a timeout
-                            await asyncio.wait_for(self._subscription_confirmed.wait(), timeout=5.0)
+                            await asyncio.wait_for(sub_event.wait(), timeout=5.0)
                             logger.info("Subscription confirmed for %s", instrument)
                         except asyncio.TimeoutError:
                             logger.warning("Timeout waiting for subscription confirmation for %s", instrument)
@@ -140,8 +140,10 @@ class SubscriptionManager:
         """
         async with self._lock:
             if instrument in self._pending_subscriptions:
-                self._pending_subscriptions.remove(instrument)
-                self._subscription_confirmed.set()
+                event = self._pending_subscriptions.pop(instrument, None)
+                if event is not None and not event.is_set():
+                    event.set()
+                    logger.debug("Set event for confirmed subscription: %s", instrument)
                 logger.info("Subscription confirmed for instrument: %s", instrument)
     
     async def remove_subscription(

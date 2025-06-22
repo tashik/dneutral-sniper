@@ -45,7 +45,7 @@ class DeribitWebsocketClient:
             return entry.get("mark_price"), entry.get("iv")
         return None, None
 
-    async def subscribe_to_instruments(self, instrument_names):
+    async def subscribe_to_instruments(self, instrument_names) -> bool:
         """
         Subscribe to a set of instrument tickers (options or futures).
         Avoid duplicate subscriptions using self.subscribed_instruments.
@@ -87,40 +87,47 @@ class DeribitWebsocketClient:
 
             # Wait for the subscription response with a timeout
             try:
-                response = await asyncio.wait_for(subscription_future, timeout=5.0)
+                response = await asyncio.wait_for(subscription_future, timeout=10.0)
+                logger.debug(f"Received subscription response: {response}")
             except asyncio.TimeoutError:
-                response = await asyncio.wait_for(subscription_future, timeout=5.0)
-            logger.debug(f"Received subscription response: {response}")
-            
+                logger.error(f"Timeout waiting for subscription response for {channels}")
+                return False
+
             # Check if response is a dictionary with a result field
             if isinstance(response, dict) and "result" in response:
                 result = response["result"]
-                
+
                 # Case 1: Result is a list of channels (e.g., ["ticker.BTC-PERPETUAL.100ms"])
                 if isinstance(result, list) and all(isinstance(x, str) for x in result):
                     self.subscribed_instruments.update(new_instruments)
                     logger.info(f"Successfully subscribed to instruments: {new_instruments}")
+                    # Notify handlers for each instrument
+                    for instrument in new_instruments:
+                        await self._notify_subscription_handlers(instrument)
                     return True
-                    
+
                 # Case 2: Result is a dictionary with a channels field
                 elif isinstance(result, dict) and "channels" in result:
                     channels = result["channels"]
-                    if isinstance(channels, list) and len(channels) == len(new_instruments):
+                    if isinstance(channels, list):
                         self.subscribed_instruments.update(new_instruments)
                         logger.info(f"Successfully subscribed to instruments: {new_instruments}")
+                        # Notify handlers for each instrument
+                        for instrument in new_instruments:
+                            await self._notify_subscription_handlers(instrument)
                         return True
-            
+
             # Handle case where response is a list (shouldn't happen with current API but just in case)
             elif isinstance(response, list) and len(response) > 0 and isinstance(response[0], dict):
                 if "result" in response[0]:
                     self.subscribed_instruments.update(new_instruments)
                     logger.info(f"Successfully subscribed to instruments: {new_instruments}")
+                    # Notify handlers for each instrument
+                    for instrument in new_instruments:
+                        await self._notify_subscription_handlers(instrument)
                     return True
-            
+
             logger.error(f"Unexpected subscription response: {response}")
-            return False
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout waiting for subscription confirmation for {channels}")
             return False
 
         except Exception as e:
@@ -158,6 +165,7 @@ class DeribitWebsocketClient:
         self.running = True
         if self.req_listener_task is None or self.req_listener_task.done():
             self.req_listener_task = asyncio.create_task(self.listen_req_ws())
+            logger.info("Started req_ws listener task")
         if self.sub_listener_task is None or self.sub_listener_task.done():
             self.sub_listener_task = asyncio.create_task(self.listen_sub_ws())
             logger.info("Started sub_ws listener task")
@@ -330,7 +338,7 @@ class DeribitWebsocketClient:
         # Check cache first if not forcing refresh
         if not force_refresh and instrument_name in self.price_iv_cache:
             cached = self.price_iv_cache[instrument_name]
-            logger.debug(f"Cache hit for {instrument_name}: {cached}")
+            # logger.debug(f"Cache hit for {instrument_name}: {cached}")
             return cached["mark_price"], cached["iv"]
 
         try:
@@ -388,19 +396,44 @@ class DeribitWebsocketClient:
         3. Error responses
         """
         try:
-            logger.debug(f"[WEBSOCKET] Received message: {message}")
+            # logger.debug(f"[WEBSOCKET] Received message: {message}")
 
             # Handle list responses (subscription confirmations)
-            if isinstance(message, list):
-                if message and len(message) > 0:
-                    # Assume first element contains subscription info
-                    sub_info = message[0]
-                    if isinstance(sub_info, dict) and "result" in sub_info and "channels" in sub_info["result"]:
-                        channels = sub_info["result"]["channels"]
-                        for channel in channels:
-                            if channel.startswith("ticker."):
+            if isinstance(message, list) and message:
+                for item in message:
+                    if not isinstance(item, dict):
+                        continue
+                        
+                    # Check for subscription confirmation in different formats
+                    if "result" in item and "channels" in item["result"]:
+                        # Format: [{"result": {"channels": ["ticker.BTC-PERPETUAL.100ms"]}}]
+                        channels = item["result"]["channels"]
+                    elif "channels" in item:
+                        # Format: [{"channels": ["ticker.BTC-PERPETUAL.100ms"]}]
+                        channels = item["channels"]
+                    else:
+                        continue
+                        
+                    if not isinstance(channels, list):
+                        channels = [channels]
+                        
+                    for channel in channels:
+                        if not isinstance(channel, str):
+                            continue
+                            
+                        if channel.startswith("ticker."):
+                            try:
                                 instrument = channel.split('.')[1]
-                                self._notify_subscription_handlers(instrument)
+                                logger.info(f"[WEBSOCKET] Processing subscription confirmation for ticker: {instrument}")
+                                # Update our internal tracking
+                                self.subscribed_instruments.add(instrument)
+                                # Notify handlers
+                                try:
+                                    await self._notify_subscription_handlers(instrument)
+                                except Exception as e:
+                                    logger.error(f"Error notifying subscription handlers for {instrument}: {e}", exc_info=True)
+                            except Exception as e:
+                                logger.error(f"Error processing subscription channel {channel}: {e}", exc_info=True)
                 return
 
             # Handle dictionary responses
@@ -422,21 +455,59 @@ class DeribitWebsocketClient:
                 return
 
             # Handle subscription confirmations
-            if "result" in message and "channels" in message.get("result", {}):
-                channels = message["result"]["channels"]
+            if "result" in message:
+                # Handle different formats of subscription confirmations
+                channels = []
+                result = message["result"]
+                
+                # Format 1: Direct list of channels
+                if isinstance(result, list):
+                    channels = result
+                # Format 2: Dictionary with 'channels' key
+                elif isinstance(result, dict) and "channels" in result:
+                    channels = result["channels"]
+                # Format 3: Dictionary with 'channel' key (single channel)
+                elif isinstance(result, dict) and "channel" in result:
+                    channels = [result["channel"]]
+                
+                # If we're in a subscription confirmation, also check the 'params' field
+                if not channels and "method" in message and message["method"] == "subscription":
+                    params = message.get("params", {})
+                    if "channel" in params:
+                        channels = [params["channel"]]
+                
+                processed_instruments = set()
                 for channel in channels:
-                    if channel.startswith("ticker."):
-                        instrument = channel.split('.')[1]
-                        logger.info(f"[WEBSOCKET] Subscription confirmed for {instrument}")
-                        # Notify all subscription handlers
-                        for handler in list(self._subscription_handlers):
-                            try:
-                                if asyncio.iscoroutinefunction(handler):
-                                    asyncio.create_task(handler(instrument))
-                                else:
-                                    handler(instrument)
-                            except Exception as e:
-                                logger.error(f"Error in subscription handler: {e}", exc_info=True)
+                    # Handle different channel formats
+                    if isinstance(channel, str):
+                        if channel.startswith("ticker."):
+                            # Extract just the instrument name (e.g., "BTC-PERPETUAL" from "ticker.BTC-PERPETUAL.100ms")
+                            parts = channel.split('.')
+                            if len(parts) >= 2:
+                                instrument = parts[1]
+                                processed_instruments.add(instrument)
+                    elif isinstance(channel, dict) and "channel" in channel:
+                        # Handle case where channel is an object with a 'channel' property
+                        channel_str = channel["channel"]
+                        if channel_str.startswith("ticker."):
+                            parts = channel_str.split('.')
+                            if len(parts) >= 2:
+                                instrument = parts[1]
+                                processed_instruments.add(instrument)
+                
+                # Notify handlers for each unique instrument
+                for instrument in processed_instruments:
+                    logger.info(f"[WEBSOCKET] Subscription confirmed for {instrument}")
+                    # Update our internal tracking
+                    self.subscribed_instruments.add(instrument)
+                    # Notify all subscription handlers
+                    try:
+                        logger.debug(f"[WEBSOCKET] Notifying handlers for {instrument}")
+                        await self._notify_subscription_handlers(instrument)
+                    except Exception as e:
+                        logger.error(f"Error notifying handlers for {instrument}: {e}", exc_info=True)
+                    else:
+                        logger.debug(f"[WEBSOCKET] Successfully notified handlers for {instrument}")
 
             # Handle subscription updates
             elif "method" in message and message["method"] == "subscription":
@@ -448,7 +519,7 @@ class DeribitWebsocketClient:
                     logger.warning("[WEBSOCKET] Received subscription message without channel")
                     return
 
-                logger.debug(f"[WEBSOCKET] Processing subscription update - Channel: {channel}")
+                # logger.debug(f"[WEBSOCKET] Processing subscription update - Channel: {channel}")
 
                 # Route to appropriate handler based on channel type
                 if channel.startswith("ticker."):
@@ -463,13 +534,58 @@ class DeribitWebsocketClient:
         except Exception as e:
             logger.error(f"[WEBSOCKET] Error handling WebSocket message: {e}", exc_info=True)
 
+    async def _notify_subscription_handlers(self, instrument: str) -> bool:
+        """
+        Notify all registered subscription handlers about a new subscription.
+        
+        Args:
+            instrument: The instrument that was subscribed to
+            
+        Returns:
+            bool: True if there were handlers to notify, False otherwise
+        """
+        if not self._subscription_handlers:
+            logger.debug(f"No subscription handlers registered to notify about {instrument}")
+            return False
+            
+        logger.info(f"Notifying {len(self._subscription_handlers)} handlers about subscription to {instrument}")
+        
+        # Create a list to store all coroutines
+        tasks = []
+        
+        # Create a task for each handler
+        for handler in list(self._subscription_handlers):  # Create a copy to avoid modification during iteration
+            logger.debug(f"Creating task for handler {handler}")
+            try:
+                # Call the handler and store the coroutine
+                coro = handler(instrument)
+                if asyncio.iscoroutine(coro):
+                    tasks.append(coro)
+                else:
+                    logger.warning(f"Handler {handler} did not return a coroutine")
+            except Exception as e:
+                logger.error(f"Error creating task for handler {handler}: {e}", exc_info=True)
+        
+        # Wait for all handlers to complete with a timeout
+        if tasks:
+            try:
+                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=10.0)
+                logger.debug(f"Successfully notified all handlers about {instrument}")
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout waiting for subscription handlers to complete for {instrument}")
+            except Exception as e:
+                logger.error(f"Error in subscription handlers for {instrument}: {e}", exc_info=True)
+            return True
+            
+        return False
+
     async def _handle_sub_message(self, message: Dict[str, Any]) -> None:
         """Legacy handler for incoming subscription messages.
 
         This is kept for backward compatibility but most logic has been moved to _handle_message.
         """
         try:
-            logger.debug(f"[WEBSOCKET] Received legacy sub message: {message}")
+            # logger.debug(f"[WEBSOCKET] Received legacy sub message: {message}")
             # Just forward to _handle_message for processing
             await self._handle_message(message)
         except Exception as e:
@@ -505,7 +621,7 @@ class DeribitWebsocketClient:
                     return
 
             mark_price = float(mark_price)
-            logger.debug(f"[WEBSOCKET] Ticker update - {instrument}: {mark_price}")
+            # logger.debug(f"[WEBSOCKET] Ticker update - {instrument}: {mark_price}")
 
             # Update price/IV cache
             mark_iv = data.get("mark_iv")
@@ -545,7 +661,7 @@ class DeribitWebsocketClient:
             ask = float(data["asks"][0][0])
             mid_price = (bid + ask) / 2
 
-            logger.debug(f"[WEBSOCKET] Order book update - {instrument}: {mid_price} (bid: {bid}, ask: {ask})")
+            # logger.debug(f"[WEBSOCKET] Order book update - {instrument}: {mid_price} (bid: {bid}, ask: {ask})")
 
             # Update price cache (without IV for order book updates)
             if instrument in self.price_iv_cache:
@@ -578,7 +694,7 @@ class DeribitWebsocketClient:
                 return
 
             price = float(trades[0]["price"])
-            logger.debug(f"[WEBSOCKET] Trade update - {instrument}: {price}")
+            # logger.debug(f"[WEBSOCKET] Trade update - {instrument}: {price}")
 
             # Update price cache (without IV for trade updates)
             if instrument in self.price_iv_cache:

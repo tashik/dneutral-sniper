@@ -6,7 +6,7 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -76,10 +76,10 @@ class EventEmitter:
             event: The event to emit
         """
         logger = logging.getLogger(__name__)
-        
+
         # Log the event being emitted
         logger.debug(f"Emitting event: {event.event_type}")
-        
+
         async with self._lock:
             listeners = self._listeners.get(event.event_type, []).copy()
             logger.debug(f"Found {len(listeners)} listeners for {event.event_type}")
@@ -91,11 +91,11 @@ class EventEmitter:
                 *[listener(event) for listener in listeners],
                 return_exceptions=True
             )
-            
+
             # Log any exceptions from listeners
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
-                    logger.error(f"Error in event listener {i} for {event.event_type}: {result}", 
+                    logger.error(f"Error in event listener {i} for {event.event_type}: {result}",
                                exc_info=result)
         else:
             logger.debug(f"No listeners for event: {event.event_type}")
@@ -194,66 +194,6 @@ class Portfolio(EventEmitter):
         portfolio.mark_clean()
         return portfolio
 
-    def save_to_file(self, filename: str) -> None:
-        """Save portfolio to a JSON file including all positions and state.
-
-        Args:
-            filename: Path to save the portfolio JSON file
-
-        Raises:
-            IOError: If there's an error writing to the file
-        """
-        try:
-            data = self.to_dict()
-
-            # Ensure directory exists
-            file_path = Path(filename)
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Write to a temporary file first
-            temp_path = file_path.with_suffix('.tmp')
-            try:
-                with temp_path.open('w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2)
-                    f.flush()
-                    os.fsync(f.fileno())
-
-                # Atomic rename on POSIX systems
-                temp_path.replace(file_path)
-
-                # Mark as clean after successful save
-                self.mark_clean()
-                logger.debug(
-                    "Successfully saved portfolio %s to %s",
-                    self.id,
-                    filename
-                )
-
-            except (IOError, OSError) as e:
-                # Clean up temp file if it exists
-                if temp_path.exists():
-                    try:
-                        temp_path.unlink()
-                    except OSError as cleanup_error:
-                        logger.warning(
-                            "Failed to clean up temp file %s: %s",
-                            temp_path,
-                            cleanup_error
-                        )
-                raise IOError(
-                    f"Failed to save portfolio {self.id} to {filename}: {e}"
-                ) from e
-
-        except Exception as e:
-            logger.error(
-                "Unexpected error saving portfolio %s to %s: %s",
-                self.id,
-                filename,
-                e,
-                exc_info=True
-            )
-            raise
-
     @classmethod
     def load_from_file(cls, filename: str) -> 'Portfolio':
         """Load a portfolio from a JSON file.
@@ -306,7 +246,7 @@ class Portfolio(EventEmitter):
 
         Raises:
             KeyError: If required fields are missing
-            ValueError: If data is invalid
+            ValueError: If data is invalid or expiry is not a datetime
         """
         try:
             if not isinstance(option_data, dict):
@@ -326,30 +266,62 @@ class Portfolio(EventEmitter):
                 if field not in option_data:
                     raise ValueError(f"Missing required field: {field}")
 
-            # Convert string timestamp to datetime if needed
+            # Ensure expiry is a valid datetime object
             expiry = option_data['expiry']
-            if isinstance(expiry, (int, float)):
-                expiry = datetime.fromtimestamp(expiry)
-            elif isinstance(expiry, str):
-                expiry = datetime.fromisoformat(expiry)
+            if not isinstance(expiry, datetime):
+                if isinstance(expiry, str):
+                    try:
+                        # Parse ISO format string to datetime
+                        expiry = datetime.fromisoformat(expiry)
+                    except (ValueError, TypeError) as e:
+                        raise ValueError(f"Invalid expiry format. Must be ISO format datetime string or datetime object: {e}")
+                else:
+                    raise ValueError("Expiry must be a datetime object or ISO format datetime string")
 
-            # Create and return the option
-            return VanillaOption(
-                instrument_name=option_data['instrument_name'],
-                quantity=float(option_data['quantity']),
-                strike=float(option_data['strike']),
-                expiry=expiry,
-                option_type=OptionType(option_data['option_type']),
-                underlying=option_data['underlying'],
-                contract_type=ContractType(option_data['contract_type']),
-                mark_price=float(option_data.get('mark_price', 0)),
-                iv=float(option_data.get('iv', 0))
-                if option_data.get('iv') is not None else None,
-                usd_value=float(option_data['usd_value'])
-                if 'usd_value' in option_data else None,
-                delta=float(option_data['delta'])
-                if option_data.get('delta') is not None else None
-            )
+            # Ensure expiry is timezone-aware
+            if expiry.tzinfo is None:
+                logger.warning(
+                    "Expiry datetime is timezone-naive, assuming UTC: %s",
+                    expiry
+                )
+                # Make it timezone-aware by assuming UTC
+                expiry = expiry.replace(tzinfo=timezone.utc)
+
+            # Validate required fields
+            quantity = float(option_data['quantity'])
+            if quantity == 0:
+                raise ValueError("Option quantity cannot be zero")
+
+            strike = float(option_data['strike'])
+            if strike <= 0:
+                raise ValueError(f"Strike price must be positive, got {strike}")
+
+            # Ensure expiry is in the future
+            if expiry <= datetime.now(timezone.utc):
+                logger.warning(f"Option {option_data['instrument_name']} has already expired: {expiry}")
+
+            # Create and return the option with optional fields
+            option_args = {
+                'instrument_name': option_data['instrument_name'],
+                'quantity': quantity,
+                'strike': strike,
+                'expiry': expiry,
+                'option_type': OptionType(option_data['option_type']),
+                'underlying': option_data['underlying'],
+                'contract_type': ContractType(option_data['contract_type']),
+                'mark_price': float(option_data.get('mark_price', 0.0)) if option_data.get('mark_price') is not None else None,
+                'iv': float(option_data['iv']) if 'iv' in option_data and option_data['iv'] is not None else None,
+                'usd_value': float(option_data['usd_value']) if 'usd_value' in option_data and option_data['usd_value'] is not None else None,
+                'delta': float(option_data['delta']) if 'delta' in option_data and option_data['delta'] is not None else None
+            }
+
+            logger.debug("Creating VanillaOption with args: %s",
+                         {k: v for k, v in option_args.items() if k != 'expiry'})
+
+            try:
+                return VanillaOption(**option_args)
+            except Exception as e:
+                raise ValueError(f"Failed to create VanillaOption: {str(e)}") from e
 
         except (ValueError, TypeError) as e:
             inst_name = option_data.get('instrument_name', 'unknown')
@@ -374,95 +346,103 @@ class Portfolio(EventEmitter):
         self.trades: List[Dict[str, Any]] = []
         # Flag for initial USD notional hedge phase
         self._initial_usd_hedged: bool = False
-        # USD notional, static hedge
+        # Static hedge position (USD notional)
         self._initial_usd_hedge_position: float = 0.0
-        # Avg entry for static hedge
+        # Average entry price for static hedge
         self._initial_usd_hedge_avg_entry: float = 0.0
         # Track if portfolio has unsaved changes
         self._dirty = False
-        
+
+    def is_dirty(self) -> bool:
+        """Check if the portfolio has unsaved changes.
+
+        Returns:
+            bool: True if the portfolio has unsaved changes, False otherwise
+        """
+        return self._dirty
+
     @property
     def underlying(self) -> Optional[str]:
         return self._underlying
-        
+
     @underlying.setter
     def underlying(self, value: Optional[str]) -> None:
         if self._underlying != value:
             self._underlying = value
             asyncio.create_task(self._mark_dirty())
-    
+
     @property
     def futures_position(self) -> float:
         return self._futures_position
-        
+
     @futures_position.setter
     def futures_position(self, value: float) -> None:
         if self._futures_position != value:
             old_value = self._futures_position
             self._futures_position = value
             asyncio.create_task(self._on_futures_position_changed(old_value, value))
-    
+
     @property
     def futures_avg_entry(self) -> float:
         return self._futures_avg_entry
-        
+
     @futures_avg_entry.setter
     def futures_avg_entry(self, value: float) -> None:
         if self._futures_avg_entry != value:
             self._futures_avg_entry = value
             asyncio.create_task(self._mark_dirty())
-    
+
     @property
     def last_hedge_price(self) -> Optional[float]:
         return self._last_hedge_price
-        
+
     @last_hedge_price.setter
     def last_hedge_price(self, value: Optional[float]) -> None:
         if self._last_hedge_price != value:
             self._last_hedge_price = value
             asyncio.create_task(self._mark_dirty())
-    
+
     @property
     def realized_pnl(self) -> float:
         return self._realized_pnl
-        
+
     @realized_pnl.setter
     def realized_pnl(self, value: float) -> None:
         if self._realized_pnl != value:
             old_value = self._realized_pnl
             self._realized_pnl = value
             asyncio.create_task(self._on_realized_pnl_changed(old_value, value))
-    
+
     @property
     def initial_usd_hedged(self) -> bool:
         return self._initial_usd_hedged
-        
+
     @initial_usd_hedged.setter
     def initial_usd_hedged(self, value: bool) -> None:
         if self._initial_usd_hedged != value:
             self._initial_usd_hedged = value
             asyncio.create_task(self._mark_dirty())
-    
+
     @property
     def initial_usd_hedge_position(self) -> float:
         return self._initial_usd_hedge_position
-        
+
     @initial_usd_hedge_position.setter
     def initial_usd_hedge_position(self, value: float) -> None:
         if self._initial_usd_hedge_position != value:
             self._initial_usd_hedge_position = value
             asyncio.create_task(self._mark_dirty())
-    
+
     @property
     def initial_usd_hedge_avg_entry(self) -> float:
         return self._initial_usd_hedge_avg_entry
-        
+
     @initial_usd_hedge_avg_entry.setter
     def initial_usd_hedge_avg_entry(self, value: float) -> None:
         if self._initial_usd_hedge_avg_entry != value:
             self._initial_usd_hedge_avg_entry = value
             asyncio.create_task(self._mark_dirty())
-            
+
     async def _on_futures_position_changed(self, old_value: float, new_value: float) -> None:
         """Handle futures position changes."""
         await self._mark_dirty()
@@ -475,7 +455,7 @@ class Portfolio(EventEmitter):
                 'delta': new_value - old_value
             }
         ))
-        
+
     async def _on_realized_pnl_changed(self, old_value: float, new_value: float) -> None:
         """Handle realized PnL changes."""
         await self._mark_dirty()
@@ -493,11 +473,27 @@ class Portfolio(EventEmitter):
         """Mark the portfolio as having unsaved changes and emit STATE_CHANGED event"""
         if not self._dirty:
             self._dirty = True
+            # Ensure the event is fully processed before continuing
             await self.emit(PortfolioEvent(
                 event_type=PortfolioEventType.STATE_CHANGED,
                 portfolio=self,
                 data={'dirty': True}
             ))
+            logger.debug("Marked portfolio %s as dirty", self.id)
+
+    def mark_clean(self):
+        """Mark the portfolio as clean (no unsaved changes).
+
+        This is called by the PortfolioManager after a successful save.
+        """
+        if self._dirty:
+            self._dirty = False
+            # We don't await here since this is called from a sync context in PortfolioManager
+            asyncio.create_task(self.emit(PortfolioEvent(
+                event_type=PortfolioEventType.STATE_CHANGED,
+                portfolio=self,
+                data={'dirty': False}
+            )))
 
     def _serialize_option(self, option: Any) -> Dict[str, Any]:
         """Serialize a single option to a dictionary.
@@ -509,166 +505,215 @@ class Portfolio(EventEmitter):
             Dict containing the serialized option data
 
         Raises:
-            ValueError: If the option is missing required attributes
+            ValueError: If the option is missing required attributes or has invalid expiry
         """
+        # Ensure we have all required attributes
+        if not hasattr(option, 'expiry') or not isinstance(option.expiry, datetime):
+            raise ValueError("Option must have a valid datetime expiry")
+
+        if not hasattr(option, 'instrument_name') or not option.instrument_name:
+            raise ValueError("Option must have an instrument_name")
+
         try:
-            return {
-                "instrument_name": getattr(option, 'instrument_name', ''),
-                "quantity": getattr(option, 'quantity', 0.0),
-                "strike": getattr(option, 'strike', 0.0),
-                "expiry": (
-                    option.expiry.isoformat()
-                    if hasattr(option, 'expiry') and option.expiry
-                    else None
-                ),
-                "option_type": (
-                    option.option_type.value
-                    if hasattr(option, 'option_type') and option.option_type
-                    else None
-                ),
-                "underlying": getattr(option, 'underlying', None),
-                "contract_type": (
-                    option.contract_type.value
-                    if hasattr(option, 'contract_type') and option.contract_type
-                    else None
-                ),
-                "mark_price": getattr(option, 'mark_price', None),
-                "iv": getattr(option, 'iv', None),
-                "usd_value": getattr(option, 'usd_value', None),
-                "delta": getattr(option, 'delta', None)
+            # Ensure expiry is timezone-aware
+            expiry = option.expiry
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+
+            # Convert to ISO format string
+            expiry_iso = expiry.isoformat()
+
+            # Build the serialized option data with required fields
+            serialized = {
+                "instrument_name": option.instrument_name,
+                "quantity": option.quantity,
+                "strike": option.strike,
+                "expiry": expiry_iso,
+                "option_type": option.option_type.value,
+                "underlying": option.underlying,
+                "contract_type": option.contract_type.value,
             }
-        except AttributeError as e:
-            logger.error(
-                "Failed to serialize option %s: missing required attribute: %s",
-                getattr(option, 'instrument_name', 'unknown'),
-                str(e)
-            )
-            raise ValueError(
-                f"Invalid option object: missing required attribute: {e}"
-            ) from e
 
-    def is_dirty(self) -> bool:
-        """Check if portfolio has unsaved changes"""
-        return self._dirty
+            # Add optional fields if they exist and are not None
+            optional_fields = [
+                'mark_price',  # Current mark price in USD
+                'iv',          # Implied volatility
+                'usd_value',   # Current USD value of the position
+                'delta'        # Current delta of the position
+            ]
 
-    def mark_clean(self):
-        """Mark the portfolio as clean (saved)"""
-        self._dirty = False
+            for field in optional_fields:
+                if hasattr(option, field):
+                    value = getattr(option, field)
+                    if value is not None:
+                        serialized[field] = value
+
+            logger.debug("Serialized option %s: %s", option.instrument_name,
+                        {k: v for k, v in serialized.items() if k != 'expiry'})
+
+            return serialized
+
+        except Exception as e:
+            logger.error("Failed to serialize option %s: %s",
+                        getattr(option, 'instrument_name', 'unknown'), str(e))
+            raise
 
     async def add_option(
         self,
         option: VanillaOption,
-        entry_price: float = None,
-        premium_usd: float = None
+        entry_price: Optional[float] = None,
+        premium_usd: Optional[float] = None,
+        trade_time: Optional[datetime] = None
     ) -> None:
-        """
-        Add or update an option in the portfolio.
+        """Add or update an option in the portfolio.
+
         If the option exists, update quantity and average entry price (weighted by quantity).
         If not, add as new.
-        Optionally takes entry_price for updating avg entry (otherwise uses strike as proxy).
-        Optionally records the option trade (premium_usd) in the trades journal.
-        Also stores premium_usd as initial_option_usd_value for reporting.
+
+
+        Args:
+            option: The option to add or update
+            entry_price: Optional entry price for updating average entry (uses strike as fallback)
+            premium_usd: Optional premium in USD for trade recording
+            trade_time: Optional timestamp for the trade (defaults to current time)
+
+        Emits:
+            OPTION_ADDED: When a new option is added
+            OPTION_UPDATED: When an existing option is updated
         """
-        from datetime import datetime
+
+        logger.debug(f"[add_option] Starting to add option: {option.instrument_name}")
+        logger.debug(f"[add_option] Option details: {option}")
+        logger.debug(f"[add_option] Entry price: {entry_price}, Premium USD: {premium_usd}")
+
+        if trade_time is None:
+            trade_time = datetime.now(timezone.utc)
+            logger.debug(f"[add_option] Using current time for trade: {trade_time}")
+
         existing = self.options.get(option.instrument_name)
-        trade_time = datetime.now().isoformat()
+        logger.debug(f"[add_option] Existing option found: {existing is not None}")
 
         if existing:
-            # Update existing option position
-            existing_option = self.options[option.instrument_name]
-            old_qty = existing_option.quantity
-            new_qty = old_qty + option.quantity
-            
-            # If the quantity hasn't changed, no need to update
-            if option.quantity == 0:
+            # Update existing option
+            old_qty = existing.quantity
+            new_qty = option.quantity
+            total_qty = old_qty + new_qty
+
+            if total_qty == 0:
+                # Remove position if net zero
+                await self.remove_option(option.instrument_name)
                 return
-                
-            # Update the quantity
-            existing_option.quantity = new_qty
 
-            # Update average entry price if needed
-            if entry_price is not None and option.quantity != 0:
-                total_qty = abs(old_qty) + abs(option.quantity)
-                if total_qty > 0:
-                    existing_option.avg_entry = (
-                        abs(old_qty) * existing_option.avg_entry +
-                        abs(option.quantity) * entry_price
-                    ) / total_qty
+            # Weighted average entry price
+            old_entry = getattr(existing, 'mark_price')
+            if old_entry is not None and entry_price is not None:
+                avg_entry = (old_entry * abs(old_qty) + entry_price * abs(new_qty)) / abs(total_qty)
+            else:
+                avg_entry = None
 
-            # Record the trade if premium_usd is provided
+            # Update existing option
+            existing.quantity = total_qty
+            if avg_entry is not None:
+                existing.mark_price = avg_entry
+
+            # Update initial USD value for existing option
+            if premium_usd is not None and option.instrument_name in self.initial_option_usd_value:
+                # For sold options (new_qty < 0), add negative premium to track hedge needed
+                hedge_delta = premium_usd * new_qty
+                self.initial_option_usd_value[option.instrument_name][0] += hedge_delta
+                existing.usd_value = self.initial_option_usd_value[option.instrument_name][0] / total_qty
+                logger.debug(f"[add_option] Updated initial_option_usd_value for {option.instrument_name} by {hedge_delta}, new value: {self.initial_option_usd_value[option.instrument_name][0]}")
+
+            # Emit update event with trade details
             trade_data = None
             if premium_usd is not None:
-                trade_time = datetime.now(timezone.utc).isoformat()
                 trade_data = {
-                    'timestamp': trade_time,
+                    'timestamp': trade_time.isoformat(),
                     'type': 'option',
                     'instrument': option.instrument_name,
-                    'qty': option.quantity,
+                    'qty': new_qty,
                     'premium_usd': premium_usd,
-                    'side': 'buy' if option.quantity > 0 else 'sell',
-                    'position_after': new_qty
+                    'side': 'buy' if new_qty > 0 else 'sell',
+                    'position_after': total_qty
                 }
                 self.trades.append(trade_data)
 
-            # Emit update event after modifying the option
             await self.emit(PortfolioEvent(
                 event_type=PortfolioEventType.OPTION_UPDATED,
                 portfolio=self,
                 data={
                     'instrument_name': option.instrument_name,
                     'old_quantity': old_qty,
-                    'new_quantity': new_qty,
+                    'new_quantity': total_qty,
                     'trade': trade_data,
-                    'option': existing_option  # Include the full option in the event data
+                    'option': existing
                 }
             ))
-            return  # Skip the rest of the function since we've handled the update
+        else:
+            # Add new option
+            if entry_price is not None:
+                option.mark_price = entry_price
 
-        # If we get here, we're adding a new option
-        self.options[option.instrument_name] = option
-        if entry_price is not None:
-            option.avg_entry = entry_price
-        # Store initial USD value for hedging
-        if premium_usd is not None:
-            self.initial_option_usd_value[option.instrument_name] = [premium_usd, 0]
+            if premium_usd is not None:
+                option.usd_value = premium_usd
 
-        # Emit add event for new option
-        await self.emit(PortfolioEvent(
-            event_type=PortfolioEventType.OPTION_ADDED,
-            portfolio=self,
-            data={
-                'instrument_name': option.instrument_name,
-                'option': option,
-                'premium_usd': premium_usd
-            }
-        ))
+            self.options[option.instrument_name] = option
 
-        # Option trade record for new option
-        if premium_usd is not None:
-            trade_data = {
-                'timestamp': trade_time,
-                'type': 'option',
-                'instrument': option.instrument_name,
-                'qty': option.quantity,
-                'premium_usd': premium_usd,
-                'side': 'buy' if option.quantity > 0 else 'sell',
-                'position_after': option.quantity
-            }
-            self.trades.append(trade_data)
+            # Store initial USD value if provided
+            if premium_usd is not None:
+                # For sold options (qty < 0), store the negative premium to indicate hedge needed
+                hedge_value = premium_usd * abs(option.quantity)
+                if option.quantity < 0:
+                    hedge_value = -hedge_value  # Negative value indicates sold option needs hedging
+                self.initial_option_usd_value[option.instrument_name] = [hedge_value, 0]
+                logger.debug(f"[add_option] Set initial_option_usd_value for {option.instrument_name} to {hedge_value}")
 
-        self._total_delta = None  # Reset cached delta
+            # Emit add event for new option
+            logger.debug(f"[add_option] Emitting OPTION_ADDED event for {option.instrument_name}")
+            event = PortfolioEvent(
+                event_type=PortfolioEventType.OPTION_ADDED,
+                portfolio=self,
+                data={
+                    'instrument_name': option.instrument_name,
+                    'option': option,
+                    'premium_usd': premium_usd
+                }
+            )
+            logger.debug(f"[add_option] Event details: {event}")
+            await self.emit(event)
+            logger.debug("[add_option] Successfully emitted OPTION_ADDED event")
+
+            # Record trade if premium provided
+            if premium_usd is not None:
+                trade_data = {
+                    'timestamp': trade_time.isoformat(),
+                    'type': 'option',
+                    'instrument': option.instrument_name,
+                    'qty': option.quantity,
+                    'premium_usd': premium_usd,
+                    'side': 'buy' if option.quantity > 0 else 'sell',
+                    'position_after': option.quantity
+                }
+                self.trades.append(trade_data)
+
+        # Reset cached values and mark as dirty
+        logger.debug("[add_option] Resetting cached values and marking as dirty")
+        self._total_delta = None
         self.initial_usd_hedged = False
+        logger.debug(f"[add_option] Before _mark_dirty, is_dirty: {self.is_dirty()}")
         await self._mark_dirty()
+        logger.debug(f"[add_option] After _mark_dirty, is_dirty: {self.is_dirty()}")
+        logger.debug(f"[add_option] Option {option.instrument_name} added/updated successfully")
 
     async def remove_option(self, instrument_name: str) -> Optional[VanillaOption]:
         """Remove an option from the portfolio.
-        
+
         Args:
             instrument_name: The instrument name of the option to remove
-            
+
         Returns:
             The removed option, or None if not found
-            
+
         Emits:
             OPTION_REMOVED: When an option is removed
         """
@@ -683,10 +728,10 @@ class Portfolio(EventEmitter):
                     'option': option
                 }
             ))
-            
+
             self._total_delta = None  # Reset cached delta
             await self._mark_dirty()
-            
+
         return option
 
     def get_option(self, instrument_name: str) -> Optional[VanillaOption]:
@@ -720,22 +765,28 @@ class Portfolio(EventEmitter):
     async def update_futures_position(self, quantity: float, price: float):
         """
         Update the USD notional futures position and recalculate the average entry price.
-        quantity: positive for buy (USD notional), negative for sell (USD notional)
+        quantity: positive for buy (USD notional), negative for sell (USD notional).
+                 Must not be zero - use a no-op instead.
         price: execution price (USD)
         All position and PNL values are in USD notional.
         Also appends a trade record to self.trades for charting.
         """
+        # Skip zero-quantity updates as they don't affect the position
+        if abs(quantity) < 1e-10:  # Using a small epsilon to account for floating point precision
+            logger.debug(f"Skipping zero-quantity futures position update at price {price}")
+            return
+
         from datetime import datetime
-        
+
         # Initialize attributes if they don't exist
         if not hasattr(self, 'realized_pnl'):
             self._realized_pnl = 0.0
         if not hasattr(self, 'trades'):
             self.trades = []
-            
+
         # Update last hedge price using property setter
         self.last_hedge_price = price
-        
+
         # Get current position values
         old_pos = self._futures_position  # Use _futures_position directly to avoid triggering events
         new_pos = old_pos + quantity
@@ -762,7 +813,7 @@ class Portfolio(EventEmitter):
                 self.futures_avg_entry = total_cost / (old_pos + quantity)
             # Update position using property setter to trigger events
             self.futures_position = new_pos
-            
+
         elif is_reducing or is_closing:
             # For reducing or closing a position, calculate realized PNL in BTC terms
             # Convert USD notional to BTC using the entry price for the portion being closed
@@ -773,7 +824,7 @@ class Portfolio(EventEmitter):
             self.futures_position = new_pos
             if is_closing:
                 self.futures_avg_entry = 0.0
-                
+
         elif is_flipping:
             # Calculate PNL for the closed portion in BTC terms
             closed_portion = -old_pos
@@ -787,18 +838,22 @@ class Portfolio(EventEmitter):
 
         # Calculate PNL for this trade
         realized_pnl_for_trade = self._realized_pnl - realized_pnl_before
-        
-        # Record trade
-        trade_data = {
-            'timestamp': trade_time,
-            'qty_usd': quantity,
-            'price': price,
-            'side': side,
-            'realized_pnl_for_trade': realized_pnl_for_trade,
-            'realized_pnl_after': self._realized_pnl,
-            'position_after': self._futures_position
-        }
-        self.trades.append(trade_data)
-        
+
+        # Only record non-zero quantity trades
+        if abs(quantity) > 1e-10:  # Using a small epsilon to account for floating point precision
+            trade_data = {
+                'timestamp': trade_time,
+                'qty_usd': quantity,
+                'price': price,
+                'side': side,
+                'realized_pnl_for_trade': realized_pnl_for_trade,
+                'realized_pnl_after': self._realized_pnl,
+                'position_after': self._futures_position
+            }
+            self.trades.append(trade_data)
+            logger.debug(f"Recorded trade: {trade_data}")
+        else:
+            logger.debug(f"Skipping zero-quantity trade at price {price}")
+
         # Mark as dirty to ensure state is saved
         await self._mark_dirty()

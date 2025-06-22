@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -28,3 +28,12 @@ class VanillaOption:
     usd_value: Optional[float] = None  # Current USD value of the option position
     delta: Optional[float] = None  # Current delta of the option position
     _greeks_calculated: bool = field(default=False, init=False)  # Internal flag for greeks calculation state
+
+    def __post_init__(self):
+        """Validate that expiry is a datetime object and ensure it's timezone-aware."""
+        if not isinstance(self.expiry, datetime):
+            raise ValueError(f"expiry must be a datetime object, got {type(self.expiry).__name__}")
+
+        # Ensure expiry is timezone-aware
+        if self.expiry.tzinfo is None:
+            self.expiry = self.expiry.replace(tzinfo=timezone.utc)

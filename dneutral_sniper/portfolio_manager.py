@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import os
-import uuid
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
@@ -58,19 +58,77 @@ class PortfolioManager:
     async def _on_portfolio_event(self, event: PortfolioEvent) -> None:
         """Handle portfolio events.
 
+        This method processes portfolio events and triggers appropriate actions
+        such as saving the portfolio state when needed.
+
         Args:
             event: The portfolio event to handle
         """
         portfolio = event.portfolio
+        logger.debug("Received portfolio event: %s for portfolio %s", event.event_type, portfolio.id)
+        logger.debug("Event data: %s", event.data)
 
-        # Cancel any pending save for this portfolio
-        if portfolio.id in self._save_tasks:
-            self._save_tasks[portfolio.id].cancel()
-
-        # Schedule a new save task with a delay
-        self._save_tasks[portfolio.id] = asyncio.create_task(
-            self._debounced_save(portfolio)
+        # Check if we should schedule a save
+        is_state_changed = event.event_type == PortfolioEventType.STATE_CHANGED
+        is_option_added = event.event_type == PortfolioEventType.OPTION_ADDED
+        is_subscription_confirmed = (
+            is_state_changed and 
+            event.data and 
+            event.data.get('type') == 'subscription_confirmed'
         )
+        
+        # Check if the portfolio is dirty or if this is a subscription confirmation
+        is_portfolio_dirty = portfolio.is_dirty()
+        should_save = is_portfolio_dirty or is_option_added or is_subscription_confirmed
+        
+        logger.debug(
+            "Save conditions - is_state_changed: %s, is_option_added: %s, "
+            "is_subscription_confirmed: %s, is_portfolio_dirty: %s, should_save: %s",
+            is_state_changed, is_option_added, is_subscription_confirmed, 
+            is_portfolio_dirty, should_save
+        )
+
+        if should_save:
+            logger.debug("Save conditions met, proceeding with save scheduling")
+            
+            # Get existing task if it exists
+            existing_task = self._save_tasks.get(portfolio.id)
+            
+            # If there's an existing task, cancel it
+            if existing_task and not existing_task.done():
+                logger.debug("Cancelling pending save task %s for portfolio %s", 
+                            existing_task.get_name(), portfolio.id)
+                existing_task.cancel()
+                try:
+                    await asyncio.wait_for(existing_task, timeout=0.5)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    logger.debug("Pending save task cancelled successfully")
+                except Exception as e:
+                    logger.warning("Error cancelling pending save task: %s", e, exc_info=True)
+
+            # Create a new save task with a delay
+            logger.debug("Creating new save task for portfolio %s with delay %.1fs", 
+                        portfolio.id, self._save_delay)
+            
+            # Create a task that will be awaited in _debounced_save
+            task = asyncio.create_task(
+                self._debounced_save(portfolio),
+                name=f"save_{portfolio.id}_{int(time.time())}"
+            )
+            
+            # Store the task for potential cancellation
+            self._save_tasks[portfolio.id] = task
+            logger.debug("Save task %s created for portfolio %s", task.get_name(), portfolio.id)
+            
+            # Add a callback to clean up the task reference when done
+            def cleanup(task):
+                if portfolio.id in self._save_tasks and self._save_tasks[portfolio.id] is task:
+                    del self._save_tasks[portfolio.id]
+                    logger.debug("Cleaned up save task for portfolio %s", portfolio.id)
+            
+            task.add_done_callback(cleanup)
+        else:
+            logger.debug("Not scheduling save - save conditions not met")
 
     async def _debounced_save(self, portfolio: Portfolio) -> None:
         """Save the portfolio after a delay to batch multiple changes.
@@ -82,27 +140,64 @@ class PortfolioManager:
             If multiple changes occur within the save delay, only the last change
             will trigger a save.
         """
+        portfolio_id = portfolio.id
+        logger.debug(
+            "[_debounced_save] Starting debounced save for portfolio %s with delay %.1fs",
+            portfolio_id, self._save_delay
+        )
+        
         try:
+            # Wait for the debounce period
             await asyncio.sleep(self._save_delay)
+            
+            # Verify this is still the current task (not cancelled and replaced)
             async with self._lock:
-                await self._save_portfolio(portfolio.id, portfolio)
-                if portfolio.id in self._save_tasks:
-                    del self._save_tasks[portfolio.id]
+                current_task = self._save_tasks.get(portfolio_id)
+                if current_task is not asyncio.current_task():
+                    logger.debug(
+                        "[_debounced_save] Ignoring stale save task for portfolio %s (current: %s, expected: %s)",
+                        portfolio_id,
+                        current_task.get_name() if current_task else 'None',
+                        asyncio.current_task().get_name() if asyncio.current_task() else 'None'
+                    )
+                    return
+                
+                logger.debug(
+                    "[_debounced_save] Delay completed, saving portfolio %s",
+                    portfolio_id
+                )
+            
+            # Save the portfolio
+            await self._save_portfolio(portfolio_id, portfolio)
+            
+            logger.debug(
+                "[_debounced_save] Successfully saved portfolio %s",
+                portfolio_id
+            )
+                
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when new changes occur
             logger.debug(
-                "Debounced save cancelled for portfolio %s (new changes detected)",
-                portfolio.id
+                "[_debounced_save] Save was cancelled for portfolio %s (new changes detected)",
+                portfolio_id
             )
+            raise
         except Exception as e:
             logger.error(
-                "Error in debounced save for portfolio %s: %s",
-                portfolio.id,
-                str(e)
+                "[_debounced_save] Error saving portfolio %s: %s",
+                portfolio_id, str(e),
+                exc_info=True
             )
         finally:
-            if portfolio.id in self._save_tasks:
-                del self._save_tasks[portfolio.id]
+            # Only clean up if this is still the current task
+            async with self._lock:
+                current_task = self._save_tasks.get(portfolio_id)
+                if current_task is asyncio.current_task():
+                    self._save_tasks.pop(portfolio_id, None)
+                    logger.debug(
+                        "[_debounced_save] Cleaned up save task for portfolio %s",
+                        portfolio_id
+                    )
 
     def _get_portfolio_path(self, portfolio_id: str) -> Path:
         """Get the file path for a portfolio.
@@ -131,43 +226,77 @@ class PortfolioManager:
             IOError: If there's an error writing to disk
             json.JSONEncodeError: If the portfolio can't be serialized to JSON
         """
-        if not portfolio:
-            raise ValueError("Cannot save None portfolio")
-
+        logger.debug("[_save_portfolio] Starting to save portfolio %s", portfolio_id)
+        
+        if portfolio is None:
+            error_msg = "Cannot save None portfolio"
+            logger.error("[_save_portfolio] %s", error_msg)
+            raise ValueError(error_msg)
+            
         if portfolio.id != portfolio_id:
-            raise ValueError("Portfolio ID mismatch")
+            error_msg = f"Portfolio ID mismatch: {portfolio.id} != {portfolio_id}"
+            logger.error("[_save_portfolio] %s", error_msg)
+            raise ValueError(error_msg)
 
+        # Create a temporary file in the same directory as the target file
         file_path = self._get_portfolio_path(portfolio_id)
-        temp_path = file_path.with_suffix('.tmp')
+        temp_file = file_path.with_suffix('.tmp')
+        
+        logger.debug("[_save_portfolio] Will save to: %s (temp: %s)", file_path, temp_file)
 
         try:
-            # Create directory if it doesn't exist
+            # Ensure the directory exists
             file_path.parent.mkdir(parents=True, exist_ok=True)
+            logger.debug("[_save_portfolio] Directory ensured: %s", file_path.parent)
 
-            # Serialize and write to temporary file
+            # Serialize the portfolio to JSON
+            logger.debug("[_save_portfolio] Serializing portfolio %s", portfolio_id)
             portfolio_data = portfolio.to_dict()
-            with temp_path.open('w', encoding='utf-8') as f:
-                json.dump(portfolio_data, f, indent=2, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
+            logger.debug("[_save_portfolio] Portfolio data serialized, converting to JSON")
+            
+            # Debug: Log the options being saved
+            if 'options' in portfolio_data:
+                logger.debug("[_save_portfolio] Options to be saved: %s", 
+                            [opt['instrument_name'] for opt in portfolio_data['options']])
+            
+            json_data = json.dumps(portfolio_data, indent=2, default=str)
+            logger.debug("[_save_portfolio] JSON data prepared, size: %d bytes", len(json_data))
 
-            # Atomic rename (works on POSIX systems)
-            temp_path.replace(file_path)
+            # Write to temporary file
+            logger.debug("[_save_portfolio] Writing to temp file: %s", temp_file)
+            with temp_file.open('w') as f:
+                f.write(json_data)
+            logger.debug("[_save_portfolio] Successfully wrote to temp file")
 
+            # Atomically replace the target file
+            logger.debug("[_save_portfolio] Renaming temp file to: %s", file_path)
+            temp_file.replace(file_path)
+            
             # Mark the portfolio as clean after successful save
             portfolio.mark_clean()
+            logger.info("[_save_portfolio] Successfully saved portfolio %s to %s", portfolio_id, file_path)
 
-            logger.debug(
-                "Successfully saved portfolio %s to %s",
-                portfolio_id, file_path
-            )
-            portfolio.mark_clean()
-            logger.debug("Saved portfolio %s to %s", portfolio.id, file_path)
-
-        except Exception as e:
-            msg = f"Failed to save portfolio {portfolio.id} to {file_path}"
-            logger.error("%s: %s", msg, str(e))
+        except json.JSONEncodeError as je:
+            logger.error("[_save_portfolio] JSON encode error for portfolio %s: %s", portfolio_id, je, exc_info=True)
+            if 'portfolio_data' in locals():
+                logger.debug("[_save_portfolio] Problematic portfolio data: %s", portfolio_data)
             raise
+        except OSError as oe:
+            logger.error("[_save_portfolio] OS error saving portfolio %s: %s", portfolio_id, oe, exc_info=True)
+            logger.debug("[_save_portfolio] File path: %s, Temp path: %s, Parent exists: %s", 
+                         file_path, temp_file, file_path.parent.exists())
+            raise
+        except Exception as e:
+            logger.error("[_save_portfolio] Unexpected error saving portfolio %s: %s", portfolio_id, e, exc_info=True)
+            raise
+        finally:
+            # Clean up the temporary file if it exists and wasn't moved
+            if temp_file.exists():
+                try:
+                    logger.debug("[_save_portfolio] Cleaning up temp file: %s", temp_file)
+                    temp_file.unlink()
+                except Exception as e:
+                    logger.warning("[_save_portfolio] Error cleaning up temp file %s: %s", temp_file, e)
 
     async def initialize(self) -> None:
         """Initialize the portfolio manager and load all portfolios.
@@ -175,7 +304,6 @@ class PortfolioManager:
         This method:
         1. Initializes the async lock if not already done
         2. Loads all portfolios from disk
-        3. Creates a default portfolio if none exist
 
         Raises:
             RuntimeError: If there's an error loading portfolios
@@ -185,15 +313,6 @@ class PortfolioManager:
 
         try:
             await self.load_all_portfolios()
-
-            # Create default portfolio if none exist
-            if not self.portfolios:
-                logger.info("No portfolios found, creating default portfolio")
-                try:
-                    await self.create_portfolio("default", "BTC")
-                except Exception as e:
-                    logger.error("Failed to create default portfolio: %s", str(e))
-                    raise RuntimeError("Failed to initialize with default portfolio") from e
 
         except Exception as e:
             logger.error("Failed to initialize portfolio manager: %s", str(e))
@@ -209,10 +328,8 @@ class PortfolioManager:
             portfolio: The portfolio to set up listeners for
 
         Raises:
-            ValueError: If the portfolio is None
+            Exception: If failed to setup listeners
         """
-        if not portfolio:
-            raise ValueError("Cannot set up listeners for None portfolio")
 
         try:
             # Add listener for all event types
@@ -380,9 +497,8 @@ class PortfolioManager:
 
                 # Set up event listeners
                 for event_type in PortfolioEventType:
-                    asyncio.create_task(
-                        portfolio.add_listener(event_type, self._on_portfolio_event)
-                    )
+                    # Don't use create_task here, just await the coroutine directly
+                    await portfolio.add_listener(event_type, self._on_portfolio_event)
 
                 # Save the portfolio
                 await self._save_portfolio(portfolio_id, portfolio)
@@ -489,18 +605,18 @@ class PortfolioManager:
 
     async def close(self) -> None:
         """Clean up resources and save all portfolios.
-        
+
         This method ensures all pending save tasks are properly cancelled and awaited,
         and all dirty portfolios are saved before closing.
         """
         # Create a copy of tasks to avoid modification during iteration
         tasks = list(self._save_tasks.values())
-        
+
         # Cancel all pending save tasks
         for task in tasks:
             if not task.done():
                 task.cancel()
-        
+
         # Wait for all tasks to complete with a timeout
         if tasks:
             done, pending = await asyncio.wait(
@@ -508,7 +624,7 @@ class PortfolioManager:
                 timeout=5.0,
                 return_when=asyncio.ALL_COMPLETED
             )
-            
+
             # Log any pending tasks that didn't complete
             if pending:
                 logger.warning(
@@ -518,17 +634,17 @@ class PortfolioManager:
                 for task in pending:
                     if not task.done():
                         task.cancel()
-        
+
         # Save any remaining dirty portfolios
         try:
             await self.save_all_portfolios()
         except Exception as e:
             logger.error("Error saving portfolios during close: %s", str(e))
-        
+
         # Clear the cache and task references
         self.portfolios.clear()
         self._save_tasks.clear()
-        
+
         logger.debug("PortfolioManager closed successfully")
 
     async def get_subscribed_instruments(self, portfolio_id: str) -> Set[str]:
@@ -620,32 +736,8 @@ class PortfolioManager:
                 )
 
                 # Add to portfolio
-                if not hasattr(portfolio, 'options'):
-                    portfolio.options = {}
+                await portfolio.add_option(option)
 
-                portfolio.options[option_instrument] = option
-
-                # Calculate and hedge the initial premium if needed
-                needs_hedging = not getattr(portfolio, 'initial_usd_hedged', False)
-                if needs_hedging and current_price is not None:
-                    try:
-                        # Calculate premium in USD
-                        if mark_price is not None:
-                            premium_usd = mark_price * abs(quantity)
-                            if contract_type_enum == ContractType.INVERSE:
-                                # For inverse options, premium is in BTC, convert to USD
-                                premium_usd = premium_usd * current_price
-
-                            # Update portfolio with hedge details
-                            portfolio.initial_usd_hedge_position = -premium_usd  # Negative since we're selling to hedge
-                            portfolio.initial_usd_hedge_avg_entry = current_price
-                            portfolio.initial_usd_hedged = True
-                            logger.info(f"Hedged initial premium: ${premium_usd:.2f} at ${current_price:.2f}")
-                    except Exception as e:
-                        logger.error(f"Failed to hedge initial premium: {e}")
-
-                # Save the updated portfolio
-                await self._save_portfolio(portfolio_id, portfolio)
                 logger.info(f"Added {quantity} of {option_instrument} to portfolio {portfolio_id}")
                 return True
 

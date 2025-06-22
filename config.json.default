@@ -1,5 +1,5 @@
 {
-  "portfolios_dir": "portfolios",
+  "portfolios_dir": "data/portfolios",
   "underlying": "BTC",
   "deribit_testnet": true,
   "deribit_credentials": {
@@ -8,9 +8,11 @@
     "testnet": true
   },
   "hedger_config": {
+    "volatility": 0.4,
+    "risk_free_rate": 0.0,
     "ddh_min_trigger_delta": 0.01,
     "ddh_target_delta": 0.0,
-    "ddh_step_mode": "percentage",
+    "ddh_step_mode": "absolute",
     "ddh_step_size": 0.01,
     "price_check_interval": 2.0,
     "min_hedge_usd": 10.0

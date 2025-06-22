@@ -78,9 +78,15 @@ class DynamicDeltaHedger:
         # We'll set up the option model with None deribit_client since we'll handle price lookups ourselves
         self.option_model = OptionModel(self.portfolio, deribit_client=None)
 
-        # Price tracking
+        self.deribit_client = deribit_client
         self.price_lock = asyncio.Lock()
+        self._stop_event = asyncio.Event()
         self.current_price: Optional[float] = None
+        self.last_hedge_time: Optional[float] = None
+        
+        # Only set price callback if deribit_client is provided and has the method
+        if self.deribit_client is not None and hasattr(self.deribit_client, 'set_price_callback'):
+            self.deribit_client.set_price_callback(self._price_callback)
 
         # Statistics
         self.stats = {
@@ -127,7 +133,7 @@ class DynamicDeltaHedger:
 
         logger.info("Stopping dynamic delta hedger...")
         self.ddh_enabled = False
-        
+
         # Signal all tasks to stop
         self._stop_event.set()
         self._price_update_event.set()  # Wake up any waiting tasks
@@ -143,12 +149,12 @@ class DynamicDeltaHedger:
                 pass
             except Exception as e:
                 logger.error(f"Error during hedger shutdown: {e}", exc_info=True)
-            
+
             # Ensure the task is done
             if not self._hedging_task.done():
                 logger.warning("Hedging task did not complete cleanly, forcing cancellation")
                 self._hedging_task.cancel()
-                
+
         # Clean up the task reference
         if hasattr(self, '_hedging_task'):
             del self._hedging_task
@@ -181,8 +187,21 @@ class DynamicDeltaHedger:
         """Update current price with thread safety
 
         Args:
-            price: The new price to set
+            price: The new price to set (must be int, float, or bool)
+
+        Raises:
+            TypeError: If price is not a number
         """
+        # Validate input type
+        if not isinstance(price, (int, float, bool)):
+            raise TypeError(f"Price must be a number, got {type(price).__name__}")
+
+        # Convert bool to int (True -> 1, False -> 0) since it's a subclass of int
+        if isinstance(price, bool):
+            price = float(int(price))
+        else:
+            price = float(price)
+
         async with self.price_lock:
             old_price = self.current_price
             self.current_price = price
@@ -192,17 +211,17 @@ class DynamicDeltaHedger:
             self._price_update_event.set()
 
             # Log price update with change percentage if we had a previous price
-            if old_price is not None and old_price > 0:
-                pct_change = ((price - old_price) / old_price) * 100
-                logger.info(
-                    f"[PRICE_UPDATE] Updated price for {self.config.instrument_name}: "
-                    f"${old_price:.2f} -> ${price:.2f} ({pct_change:+.2f}%)"
-                )
-            else:
-                logger.info(
-                    f"[PRICE_UPDATE] Initial price set for {self.config.instrument_name}: "
-                    f"${price:.2f}"
-                )
+            # if old_price is not None and old_price > 0:
+            #     pct_change = ((price - old_price) / old_price) * 100
+            #     logger.info(
+            #         f"[PRICE_UPDATE] Updated price for {self.config.instrument_name}: "
+            #         f"${old_price:.2f} -> ${price:.2f} ({pct_change:+.2f}%)"
+            #     )
+            # else:
+            #     logger.info(
+            #         f"[PRICE_UPDATE] Initial price set for {self.config.instrument_name}: "
+            #         f"${price:.2f}"
+            #     )
 
     async def _run_hedging_loop(self):
         """Main hedging loop"""
@@ -280,23 +299,25 @@ class DynamicDeltaHedger:
                 return
 
             # STATIC OPTION PREMIUM HEDGING
-            logger.info("Processing initial hedge")
             await self._execute_initial_option_premium_hedge_if_needed(current_price)
 
-            # Store the current price as last price before processing the hedge
-            # This ensures we don't keep reprocessing the same initial hedge
-            if self.price_last is None:
-                self.price_last = current_price
-
-            # DYNAMIC DELTA HEDGING
-            if not self._should_process_hedge(current_price):
+            if self.ddh_pending:
                 return
+
+            # DYNAMIC DELTA HEDGING - Check if we should process a hedge
+            should_hedge = self._should_process_hedge(current_price)
+
+            if not should_hedge:
+                return
+
+            self.ddh_pending = True
 
             # Calculate and update current delta position
             try:
                 await self._calculate_and_update_delta()
             except Exception as e:
                 logger.error(f"Error calculating delta: {e}", exc_info=True)
+                self.ddh_pending = False
                 return
 
             # Execute hedging if needed
@@ -348,7 +369,7 @@ class DynamicDeltaHedger:
         time_based_hedge = False
         if self.last_hedge_time is not None:
             time_since_last_hedge = time.time() - self.last_hedge_time
-            time_based_hedge = time_since_last_hedge > (self.config.price_check_interval * 5)
+            time_based_hedge = time_since_last_hedge > 3600
         else:
             # If we've never hedged before, we should do an initial hedge
             time_based_hedge = True
@@ -488,11 +509,13 @@ class DynamicDeltaHedger:
     async def _execute_hedge_if_needed(self):
         """Execute hedging if net delta difference exceeds threshold"""
         if self.cur_delta is None or self.target_delta is None:
+            self.ddh_pending = False
             return
 
         hedge_price = await self._get_current_price()
         if hedge_price is None:
             logger.warning("Cannot execute hedge order: current price is None.")
+            self.ddh_pending = False
             return
         # Net delta is already calculated and stored in self.cur_delta
         required_hedge = self.target_delta - self.cur_delta
@@ -510,6 +533,7 @@ class DynamicDeltaHedger:
                 f"Required net delta hedge {required_hedge} is less than " +
                 f"min_trigger_delta {self.config.ddh_min_trigger_delta}, skipping hedge."
             )
+            self.ddh_pending = False
 
     async def _execute_hedge_order(self, required_hedge: float) -> None:
         """Execute a hedge order to adjust portfolio delta.
@@ -521,10 +545,12 @@ class DynamicDeltaHedger:
         current_price = await self._get_current_price()
         if current_price is None:
             logger.warning("Cannot execute hedge order: current price is None.")
+            self.ddh_pending = False
             return
 
         if abs(required_hedge) < 1e-8:  # Near zero
             logger.info("No hedge required (delta is effectively zero).")
+            self.ddh_pending = False
             return
 
         # Calculate USD notional to trade
@@ -546,6 +572,7 @@ class DynamicDeltaHedger:
             if not self.last_hedge_time:
                 # Still update the last_hedge_time to prevent immediate re-hedging
                 self.last_hedge_time = time.time()
+                self.ddh_pending = False
                 return
 
         # Round down to nearest min_hedge_usd to avoid odd lot sizes
@@ -591,9 +618,11 @@ class DynamicDeltaHedger:
 
             self.hedge_count += 1
             self.last_hedge_time = time.time()
+            self.ddh_pending = False
 
         except Exception as e:
             logger.error(f"Error executing hedge order: {e}", exc_info=True)
+            self.ddh_pending = False
             raise
 
     async def _execute_initial_option_premium_hedge_if_needed(self, current_price: float):
@@ -608,64 +637,92 @@ class DynamicDeltaHedger:
         required_hedge_qty = 0.0
         options_to_hedge = []
 
+        # Only proceed if the absolute difference between needed and actual hedge exceeds min_hedge_usd
+        min_hedge = self.config.min_hedge_usd
+
         # Calculate total required hedge across all options
         for instrument, (needed_hedge, actual_hedge) in list(self.portfolio.initial_option_usd_value.items()):
             required_qty = needed_hedge - actual_hedge
-            if abs(required_qty) >= self.config.min_hedge_usd:
+            if abs(required_qty) > min_hedge:  # If there's any hedge needed
+                # Track the unrounded amount for proportional distribution later
                 required_hedge_qty += required_qty
                 options_to_hedge.append((instrument, needed_hedge, actual_hedge))
-                logger.info(
-                    f"Option {instrument} needs hedging: " +
-                    f"needed=${needed_hedge:.2f}, actual=${actual_hedge:.2f}, " +
-                    f"required=${required_qty:.2f}"
-                )
-            elif abs(required_qty) > 0:
-                logger.debug(
-                    f"Hedge not needed for {instrument}: required_qty=${required_qty:.2f}" +
-                    f" < min_hedge_usd=${self.config.min_hedge_usd:.2f}"
-                )
 
-        # Only proceed if we have a significant hedge amount
-        if abs(required_hedge_qty) >= self.config.min_hedge_usd:
-            # Round to the nearest multiple of min_hedge_usd in the direction of required_hedge_qty
-            min_hedge = self.config.min_hedge_usd
-            rounded_hedge_qty = math.copysign(
-                math.floor(abs(required_hedge_qty) / min_hedge) * min_hedge,
-                required_hedge_qty
+
+        if abs(required_hedge_qty) >= min_hedge:
+            logger.info("Processing initial hedge")
+            # Round up to the nearest multiple of min_hedge_usd in the direction of required_hedge_qty
+            abs_hedge = abs(required_hedge_qty)
+            # Calculate number of min_hedge units needed, rounding up
+            units = math.ceil(abs_hedge / min_hedge)
+            # Ensure we hedge at least min_hedge
+            units = max(1, units)  # At least 1 unit
+            rounded_hedge_qty = math.copysign(units * min_hedge, required_hedge_qty)
+
+            logger.info(
+                f"Hedging required: ${required_hedge_qty:.2f} >= min_hedge_usd=${min_hedge:.2f}, " +
+                f"rounded to ${rounded_hedge_qty:.2f}"
             )
+        else:
+            logger.debug(
+                f"Skipping hedge: required=${required_hedge_qty:.2f} " +
+                f"< min_hedge_usd=${min_hedge:.2f}"
+            )
+            return
 
-            # Execute the hedge
-            await self._execute_initial_option_premium_hedge(current_price, rounded_hedge_qty)
+        # Execute the hedge
+        await self._execute_initial_option_premium_hedge(current_price, rounded_hedge_qty)
 
-            if self.price_last is None:
-                self.price_last = current_price
+        # Update the actual hedged amounts proportionally using the rounded hedge amount
+        for instrument, needed_hedge, actual_hedge in options_to_hedge:
+            # Calculate this option's portion of the hedge based on the original required amount
+            option_portion = (needed_hedge - actual_hedge) / required_hedge_qty
 
-            # Update the actual hedged amounts proportionally
-            for instrument, needed_hedge, actual_hedge in options_to_hedge:
-                # Calculate this option's portion of the hedge
-                option_portion = (needed_hedge - actual_hedge) / required_hedge_qty
-                hedge_amount = rounded_hedge_qty * option_portion
-                new_actual_hedge = actual_hedge + hedge_amount
+            # Calculate the original hedge amount for this option
+            original_hedge_amount = required_hedge_qty * option_portion
 
-                # Update the actual hedge amount, keeping needed_hedge the same
-                self.portfolio.initial_option_usd_value[instrument] = (
-                    needed_hedge,
-                    new_actual_hedge
-                )
-                logger.info(
-                    f"Updated hedge for {instrument}: actual=${new_actual_hedge:.2f} " +
-                    f"(was ${actual_hedge:.2f})"
-                )
+            # Calculate the rounded hedge amount for this option, ensuring it's rounded up to min_hedge_usd
+            # if it's a new hedge (actual_hedge is 0) or if the remaining amount is significant
+            if abs(original_hedge_amount) >= min_hedge or abs(actual_hedge) < 1e-9:  # Close to zero
+                # For new hedges or significant amounts, round up to the nearest min_hedge_usd
+                abs_hedge = abs(original_hedge_amount)
+                units = math.ceil(abs_hedge / min_hedge)
+                rounded_hedge_amount = math.copysign(units * min_hedge, original_hedge_amount)
+            else:
+                # For small adjustments to existing hedges, use the exact amount
+                rounded_hedge_amount = original_hedge_amount
+
+            # Update the actual hedge amount with the rounded value
+            new_actual_hedge = actual_hedge + rounded_hedge_amount
+
+            # Store the actual executed hedge amount in the portfolio
+            # Keep needed_hedge as is, only round the actual_hedge
+            self.portfolio.initial_option_usd_value[instrument][1] = new_actual_hedge
+
+            logger.info(
+                f"Updated hedge for {instrument}: " +
+                f"needed=${needed_hedge:.2f}, " +
+                f"hedged=${rounded_hedge_amount:.2f} (from ${original_hedge_amount:.2f}), " +
+                f"total_hedged=${new_actual_hedge:.2f} (was ${actual_hedge:.2f})"
+            )
 
     async def _execute_initial_option_premium_hedge(self, current_price: float, required_hedge_qty: float):
         """Execute initial option premium hedge"""
         logger.info("Executing initial option premium hedge...")
 
         # Update portfolio state
+        logger.debug(f"[DEBUG] Before hedge - initial_usd_hedge_position: {self.portfolio.initial_usd_hedge_position}")
+        logger.debug(f"[DEBUG] Required hedge qty: {required_hedge_qty}")
+        
         self.portfolio.initial_usd_hedged = True
         old_hedge_qty = self.portfolio.initial_usd_hedge_position
         new_hedge_qty = old_hedge_qty + required_hedge_qty
+        
+        logger.debug(f"[DEBUG] Setting initial_usd_hedge_position to {new_hedge_qty}")
         self.portfolio.initial_usd_hedge_position = new_hedge_qty
+        
+        # Verify the value was set correctly
+        logger.debug(f"[DEBUG] After set - initial_usd_hedge_position: {self.portfolio.initial_usd_hedge_position}")
 
         realized_pnl = 0.0
 

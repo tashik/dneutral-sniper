@@ -97,7 +97,7 @@ class HedgingManagerTestHarness:
         }
 
         # Add a test option to the portfolio
-        expiry = datetime.utcnow() + timedelta(days=30)
+        expiry = datetime.now() + timedelta(days=30)
         option = VanillaOption(
             instrument_name=TEST_OPTION_INSTRUMENT,
             option_type=OptionType.CALL,
