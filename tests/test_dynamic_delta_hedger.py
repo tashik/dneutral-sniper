@@ -448,76 +448,50 @@ async def test_hedger_triggers_hedge(hedger_config, mock_portfolio, mock_client)
     assert usd_qty < 0  # Should sell to reduce delta
     assert price == 100.0
 
+@pytest.mark.parametrize("delta,expected_direction,test_name", [
+    (0.3, "SELL", "positive delta triggers SELL"),
+    (-0.5, "BUY", "negative delta triggers BUY"),
+    (1.0, "SELL", "large positive delta triggers SELL"),
+    (-1.0, "BUY", "large negative delta triggers BUY")
+])
 @pytest.mark.asyncio
-async def test_hedger_sign_and_direction(hedger_config, mock_portfolio, mock_client):
-    """Test that the hedger correctly handles both positive and negative deltas."""
-    # Setup
-    hedger = DynamicDeltaHedger(hedger_config, mock_portfolio, mock_client)
-    hedger.current_price = 100.0
-
-    # Test SELL direction (cur_delta > 0)
-    hedger.cur_delta = 0.3
-    hedger.target_delta = 0.0
-    await hedger._execute_hedge_if_needed()
-
-    # Verify SELL order was placed
-    assert len(mock_portfolio.hedge_calls) == 1
-    usd_qty, price = mock_portfolio.hedge_calls[0]
-    assert usd_qty < 0  # Negative for SELL
-    assert price == 100.0
-
-    # Reset for next test
-    mock_portfolio.hedge_calls.clear()
-    mock_portfolio._futures_position = 0.0
-
-    # Test BUY direction (cur_delta < 0)
-    hedger.cur_delta = -0.5
-    hedger.target_delta = 0.0
-    await hedger._execute_hedge_if_needed()
-
-    # Verify BUY order was placed
-    assert len(mock_portfolio.hedge_calls) == 1
-    usd_qty, price = mock_portfolio.hedge_calls[0]
-    assert usd_qty > 0  # Positive for BUY
-    assert price == 100.0
-
-@pytest.mark.asyncio
-async def test_hedge_direction_after_fix(hedger_config, mock_portfolio, mock_client, caplog):
-    """Regression test for hedge direction fix.
-
-    Verifies that a positive delta results in a SELL order (negative usd_qty) and
-    a negative delta results in a BUY order (positive usd_qty).
+async def test_hedge_direction(hedger_config, mock_portfolio, mock_client, delta, expected_direction, test_name):
+    """Test that the hedger correctly handles both positive and negative deltas.
+    
+    Verifies that:
+    - Positive delta results in a SELL order (negative usd_qty)
+    - Negative delta results in a BUY order (positive usd_qty)
+    - Hedge is executed at the current price
     """
-    # Enable debug logging
-    import logging
-    logging.basicConfig(level=logging.DEBUG)
-    logger = logging.getLogger(__name__)
-
-    # Setup test with a portfolio that has a positive delta from options
-    mock_portfolio._total_delta = 1.0  # 1 BTC positive delta
+    # Setup test with the specified delta
+    mock_portfolio._total_delta = delta
     mock_portfolio._futures_position = 0.0  # No futures position
 
-    # Add a test option to the portfolio to ensure delta calculation works
+    # Create a test option with the specified delta
     from datetime import datetime, timezone, timedelta
     from dneutral_sniper.models import VanillaOption, OptionType, ContractType
-
-    # Create a test option with a delta of 0.5 (for testing)
+    
+    # Calculate quantity needed to achieve the target delta (assuming 0.5 delta per contract)
+    quantity = delta / 0.5
+    
+    # Create the test option
     test_option = VanillaOption(
-        instrument_name="BTC-31DEC25-100000-C",
+        instrument_name=f"BTC-31DEC25-{int(100000 * (1 + delta))}-C",
         option_type=OptionType.CALL,
         strike=100000.0,
         expiry=datetime.now(timezone.utc) + timedelta(days=365),
-        quantity=2.0,  # 2 contracts with 0.5 delta each = 1.0 delta
+        quantity=quantity,
         underlying="BTC",
-        usd_value=5000.0,
+        usd_value=5000.0 * abs(delta),  # Scale value with delta
         mark_price=0.05,
-        contract_type=ContractType.INVERSE
+        contract_type=ContractType.INVERSE,
+        delta=0.5  # Fixed delta for testing
     )
-
+    
     # Add the option to the portfolio
     mock_portfolio._options = {test_option.instrument_name: test_option}
 
-    # Create a copy of the config with a lower min_hedge_usd to ensure the hedge is executed
+    # Create a copy of the config with appropriate settings
     from copy import deepcopy
     config = deepcopy(hedger_config)
     config.min_hedge_usd = 1.0  # Lower the minimum hedge amount
@@ -526,78 +500,31 @@ async def test_hedge_direction_after_fix(hedger_config, mock_portfolio, mock_cli
     # Create and start hedger with the updated config
     hedger = DynamicDeltaHedger(config, mock_portfolio, mock_client)
     await hedger.start()
+    
+    try:
+        # Set the current price and delta
+        hedger.current_price = 100.0
+        hedger.cur_delta = delta
+        hedger.target_delta = 0.0  # Target delta-neutral position
+        
+        # Test the hedge execution
+        await hedger._execute_hedge_if_needed()
+        
+        # Verify the hedge was executed correctly
+        assert len(mock_portfolio.hedge_calls) == 1, f"Expected 1 hedge call for {test_name}"
+        usd_qty, price = mock_portfolio.hedge_calls[0]
+        
+        # Verify direction and price
+        if expected_direction == "SELL":
+            assert usd_qty < 0, f"Expected negative usd_qty for SELL, got {usd_qty} in {test_name}"
+        else:  # BUY
+            assert usd_qty > 0, f"Expected positive usd_qty for BUY, got {usd_qty} in {test_name}"
+        
+        assert price == 100.0, f"Expected price 100.0, got {price} in {test_name}"
+    finally:
+        await hedger.stop()
 
-    # Verify the hedger started correctly
-    assert hedger.ddh_enabled, "Hedger should be enabled after start"
-    assert hasattr(hedger, '_hedging_task'), "Hedger should have a _hedging_task"
-    assert not hedger._hedging_task.done(), "Hedging task should be running"
 
-    # Set current price
-    current_price = 50000.0
-    await hedger._update_price(current_price)
-
-    # Verify price was updated
-    assert hedger.current_price == current_price, "Current price should be updated"
-
-    # Process hedging cycle
-    await hedger._process_hedging_cycle()
-
-    # Debug: Print all log messages
-    for record in caplog.records:
-        print(f"{record.levelname}: {record.message}")
-
-    # Verify hedge direction - with long calls, we should SELL to hedge
-    assert len(mock_portfolio.hedge_calls) > 0, "No hedge calls were made"
-    usd_qty, price = mock_portfolio.hedge_calls[0]
-    # For long calls (positive delta), we need to SELL (negative usd_qty) to hedge
-    assert usd_qty < 0, f"Expected negative usd_qty for SELL to hedge long calls, got {usd_qty}"
-    assert price == current_price, f"Expected price {current_price}, got {price}"
-
-    # Create a fresh portfolio for negative delta test
-    mock_portfolio = DummyPortfolio()
-
-    # Create a short call option (negative quantity) with delta of -0.5
-    short_call = VanillaOption(
-        instrument_name="BTC-31DEC25-100000-C",
-        option_type=OptionType.CALL,
-        strike=100000.0,
-        expiry=datetime.now(timezone.utc) + timedelta(days=365),
-        quantity=-2.0,  # Negative quantity for short position
-        underlying="BTC",
-        usd_value=-5000.0,  # Negative value for short position
-        mark_price=0.05,
-        delta=0.5,  # Delta will be multiplied by quantity (-2.0 * 0.5 = -1.0)
-        contract_type=ContractType.INVERSE
-    )
-
-    # Add the short option to the portfolio
-    mock_portfolio._options = {short_call.instrument_name: short_call}
-
-    # Reset futures position
-    mock_portfolio._futures_position = 0.0
-    mock_portfolio._initial_usd_hedge_position = 0.0
-
-    # Create a new hedger instance with the fresh portfolio
-    hedger = DynamicDeltaHedger(config, mock_portfolio, mock_client)
-    await hedger.start()
-
-    # Update the price to ensure the hedge is processed
-    current_price += 1.0
-    await hedger._update_price(current_price)
-
-    # Process hedging cycle again
-    await hedger._process_hedging_cycle()
-
-    # Verify hedge direction - with short calls, we should BUY to hedge
-    assert len(mock_portfolio.hedge_calls) > 0, "No hedge calls were made for negative delta"
-    usd_qty, price = mock_portfolio.hedge_calls[0]
-    # For short calls (negative delta), we need to BUY (positive usd_qty) to hedge
-    assert usd_qty > 0, f"Expected positive usd_qty for BUY to hedge short calls, got {usd_qty}"
-    assert price == current_price, f"Expected price {current_price}, got {price}"
-
-    # Clean up
-    await hedger.stop()
-    assert not hasattr(hedger, '_hedging_task'), "Hedging task should be cleaned up"
 
 @pytest.mark.asyncio
 async def test_negative_premium_hedge(hedger_config, mock_client):

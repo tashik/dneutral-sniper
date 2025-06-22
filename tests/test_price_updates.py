@@ -265,63 +265,26 @@ async def test_price_update_with_errors(hedger: DynamicDeltaHedger):
         if original_price is not None:
             await hedger._update_price(original_price)
 
-async def test_price_update_with_invalid_input():
-    """Test that we handle invalid price inputs correctly."""
-    from dneutral_sniper.dynamic_delta_hedger import DynamicDeltaHedger, HedgerConfig
-    from unittest.mock import MagicMock, patch
+@pytest.mark.parametrize("test_input,expected_price,expected_exception,match", [
+    # Valid numeric inputs
+    (100.0, 100.0, None, None),  # Standard price
+    (-50.0, -50.0, None, None),   # Negative price
+    (0.0, 0.0, None, None),       # Zero price
+    (True, 1.0, None, None),      # Boolean True (converts to 1.0)
+    (False, 0.0, None, None),     # Boolean False (converts to 0.0)
     
-    # Create a test config
-    config = HedgerConfig(
-        ddh_min_trigger_delta=0.1,
-        ddh_target_delta=0.0,
-        ddh_step_mode='percentage',
-        ddh_step_size=0.01,
-        price_check_interval=2.0,
-        underlying="TEST",
-        instrument_name="TEST-PERPETUAL",
-        volatility=0.8,
-        risk_free_rate=0.0,
-        min_hedge_usd=10.0
-    )
+    # Invalid inputs that should raise TypeError
+    (None, None, TypeError, "Price must be a number, got NoneType"),
+    ("not a number", None, TypeError, "Price must be a number, got str"),
+    ({"price": 100.0}, None, TypeError, "Price must be a number, got dict"),
+    ([100.0], None, TypeError, "Price must be a number, got list"),
+])
+async def test_price_update_validation(test_input, expected_price, expected_exception, match):
+    """Test validation of price update inputs.
     
-    # Create a mock portfolio
-    mock_portfolio = MagicMock()
-    
-    # Create a new hedger instance
-    test_hedger = DynamicDeltaHedger(config, mock_portfolio)
-    
-    # Test with valid price first
-    await test_hedger._update_price(100.0)
-    assert test_hedger.current_price == 100.0
-    
-    # Test with negative price (should be valid)
-    await test_hedger._update_price(-50.0)
-    assert test_hedger.current_price == -50.0
-    
-    # Test with non-numeric price (should raise TypeError)
-    with pytest.raises(TypeError, match="Price must be a number, got str"):
-        await test_hedger._update_price("not a number")
-    
-    # Test with None price (should raise TypeError)
-    with pytest.raises(TypeError, match="Price must be a number, got NoneType"):
-        await test_hedger._update_price(None)
-    
-    try:
-        # Test with valid price first (outside logger patch)
-        await test_hedger._update_price(100.0)
-        assert test_hedger.current_price == 100.0
-        
-        # Test with negative price (should be valid)
-        await test_hedger._update_price(-50.0)
-        assert test_hedger.current_price == -50.0
-            
-    finally:
-        # Clean up
-        if hasattr(test_hedger, 'stop'):
-            await test_hedger.stop()
-
-async def test_price_update_with_invalid_type():
-    """Test that we handle invalid price types correctly."""
+    This test verifies that the _update_price method correctly handles various input types,
+    raising appropriate exceptions for invalid inputs and properly processing valid ones.
+    """
     from dneutral_sniper.dynamic_delta_hedger import DynamicDeltaHedger, HedgerConfig
     from unittest.mock import MagicMock
     
@@ -346,28 +309,18 @@ async def test_price_update_with_invalid_type():
     test_hedger = DynamicDeltaHedger(config, mock_portfolio)
     
     try:
-        # Set initial price
+        # Set initial price to a known value
         await test_hedger._update_price(100.0)
-        assert test_hedger.current_price == 100.0
         
-        # Test with dict (invalid type) - should raise TypeError
-        with pytest.raises(TypeError, match="Price must be a number, got dict"):
-            await test_hedger._update_price({"price": 100.0})
-                
-        # Test with list (invalid type) - should raise TypeError
-        with pytest.raises(TypeError, match="Price must be a number, got list"):
-            await test_hedger._update_price([100.0])
-        
-        # Test with bool (valid in Python as it's a subclass of int)
-        # Should be converted to 1.0 for True
-        await test_hedger._update_price(True)
-        assert test_hedger.current_price == 1.0  # True is converted to 1.0
-        
-        # Test with False (valid in Python as it's a subclass of int)
-        # Should be converted to 0.0 for False
-        await test_hedger._update_price(False)
-        assert test_hedger.current_price == 0.0  # False is converted to 0.0
-                
+        if expected_exception is not None:
+            # Test that invalid inputs raise the expected exception
+            with pytest.raises(expected_exception, match=match):
+                await test_hedger._update_price(test_input)
+        else:
+            # Test that valid inputs are processed correctly
+            await test_hedger._update_price(test_input)
+            assert test_hedger.current_price == expected_price
+            
     finally:
         # Clean up
         if hasattr(test_hedger, 'stop'):
