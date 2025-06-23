@@ -403,7 +403,7 @@ class DeribitWebsocketClient:
                 for item in message:
                     if not isinstance(item, dict):
                         continue
-                        
+
                     # Check for subscription confirmation in different formats
                     if "result" in item and "channels" in item["result"]:
                         # Format: [{"result": {"channels": ["ticker.BTC-PERPETUAL.100ms"]}}]
@@ -413,25 +413,32 @@ class DeribitWebsocketClient:
                         channels = item["channels"]
                     else:
                         continue
-                        
+
                     if not isinstance(channels, list):
                         channels = [channels]
-                        
+
                     for channel in channels:
                         if not isinstance(channel, str):
                             continue
-                            
+
                         if channel.startswith("ticker."):
                             try:
                                 instrument = channel.split('.')[1]
-                                logger.info(f"[WEBSOCKET] Processing subscription confirmation for ticker: {instrument}")
+                                logger.info(
+                                    "[WEBSOCKET] Processing subscription confirmation" +
+                                    f" for ticker: {instrument}"
+                                )
                                 # Update our internal tracking
                                 self.subscribed_instruments.add(instrument)
                                 # Notify handlers
                                 try:
                                     await self._notify_subscription_handlers(instrument)
                                 except Exception as e:
-                                    logger.error(f"Error notifying subscription handlers for {instrument}: {e}", exc_info=True)
+                                    logger.error(
+                                        "Error notifying subscription handlers" +
+                                        f" for {instrument}: {e}",
+                                        exc_info=True
+                                    )
                             except Exception as e:
                                 logger.error(f"Error processing subscription channel {channel}: {e}", exc_info=True)
                 return
@@ -459,7 +466,7 @@ class DeribitWebsocketClient:
                 # Handle different formats of subscription confirmations
                 channels = []
                 result = message["result"]
-                
+
                 # Format 1: Direct list of channels
                 if isinstance(result, list):
                     channels = result
@@ -469,13 +476,13 @@ class DeribitWebsocketClient:
                 # Format 3: Dictionary with 'channel' key (single channel)
                 elif isinstance(result, dict) and "channel" in result:
                     channels = [result["channel"]]
-                
+
                 # If we're in a subscription confirmation, also check the 'params' field
                 if not channels and "method" in message and message["method"] == "subscription":
                     params = message.get("params", {})
                     if "channel" in params:
                         channels = [params["channel"]]
-                
+
                 processed_instruments = set()
                 for channel in channels:
                     # Handle different channel formats
@@ -494,7 +501,7 @@ class DeribitWebsocketClient:
                             if len(parts) >= 2:
                                 instrument = parts[1]
                                 processed_instruments.add(instrument)
-                
+
                 # Notify handlers for each unique instrument
                 for instrument in processed_instruments:
                     logger.info(f"[WEBSOCKET] Subscription confirmed for {instrument}")
@@ -537,22 +544,22 @@ class DeribitWebsocketClient:
     async def _notify_subscription_handlers(self, instrument: str) -> bool:
         """
         Notify all registered subscription handlers about a new subscription.
-        
+
         Args:
             instrument: The instrument that was subscribed to
-            
+
         Returns:
             bool: True if there were handlers to notify, False otherwise
         """
         if not self._subscription_handlers:
             logger.debug(f"No subscription handlers registered to notify about {instrument}")
             return False
-            
+
         logger.info(f"Notifying {len(self._subscription_handlers)} handlers about subscription to {instrument}")
-        
+
         # Create a list to store all coroutines
         tasks = []
-        
+
         # Create a task for each handler
         for handler in list(self._subscription_handlers):  # Create a copy to avoid modification during iteration
             logger.debug(f"Creating task for handler {handler}")
@@ -565,7 +572,7 @@ class DeribitWebsocketClient:
                     logger.warning(f"Handler {handler} did not return a coroutine")
             except Exception as e:
                 logger.error(f"Error creating task for handler {handler}: {e}", exc_info=True)
-        
+
         # Wait for all handlers to complete with a timeout
         if tasks:
             try:
@@ -576,7 +583,7 @@ class DeribitWebsocketClient:
             except Exception as e:
                 logger.error(f"Error in subscription handlers for {instrument}: {e}", exc_info=True)
             return True
-            
+
         return False
 
     async def _handle_sub_message(self, message: Dict[str, Any]) -> None:

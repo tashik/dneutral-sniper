@@ -8,7 +8,7 @@ handling their lifecycle, persistence, and providing thread-safe operations.
 import asyncio
 import json
 import logging
-import os
+import uuid
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
@@ -72,32 +72,34 @@ class PortfolioManager:
         is_state_changed = event.event_type == PortfolioEventType.STATE_CHANGED
         is_option_added = event.event_type == PortfolioEventType.OPTION_ADDED
         is_subscription_confirmed = (
-            is_state_changed and 
-            event.data and 
+            is_state_changed and
+            event.data and
             event.data.get('type') == 'subscription_confirmed'
         )
-        
+
         # Check if the portfolio is dirty or if this is a subscription confirmation
         is_portfolio_dirty = portfolio.is_dirty()
         should_save = is_portfolio_dirty or is_option_added or is_subscription_confirmed
-        
+
         logger.debug(
             "Save conditions - is_state_changed: %s, is_option_added: %s, "
             "is_subscription_confirmed: %s, is_portfolio_dirty: %s, should_save: %s",
-            is_state_changed, is_option_added, is_subscription_confirmed, 
+            is_state_changed, is_option_added, is_subscription_confirmed,
             is_portfolio_dirty, should_save
         )
 
         if should_save:
             logger.debug("Save conditions met, proceeding with save scheduling")
-            
+
             # Get existing task if it exists
             existing_task = self._save_tasks.get(portfolio.id)
-            
+
             # If there's an existing task, cancel it
             if existing_task and not existing_task.done():
-                logger.debug("Cancelling pending save task %s for portfolio %s", 
-                            existing_task.get_name(), portfolio.id)
+                logger.debug(
+                    "Cancelling pending save task %s for portfolio %s",
+                    existing_task.get_name(), portfolio.id
+                )
                 existing_task.cancel()
                 try:
                     await asyncio.wait_for(existing_task, timeout=0.5)
@@ -107,25 +109,27 @@ class PortfolioManager:
                     logger.warning("Error cancelling pending save task: %s", e, exc_info=True)
 
             # Create a new save task with a delay
-            logger.debug("Creating new save task for portfolio %s with delay %.1fs", 
-                        portfolio.id, self._save_delay)
-            
+            logger.debug(
+                "Creating new save task for portfolio %s with delay %.1fs",
+                portfolio.id, self._save_delay
+            )
+
             # Create a task that will be awaited in _debounced_save
             task = asyncio.create_task(
                 self._debounced_save(portfolio),
                 name=f"save_{portfolio.id}_{int(time.time())}"
             )
-            
+
             # Store the task for potential cancellation
             self._save_tasks[portfolio.id] = task
             logger.debug("Save task %s created for portfolio %s", task.get_name(), portfolio.id)
-            
+
             # Add a callback to clean up the task reference when done
             def cleanup(task):
                 if portfolio.id in self._save_tasks and self._save_tasks[portfolio.id] is task:
                     del self._save_tasks[portfolio.id]
                     logger.debug("Cleaned up save task for portfolio %s", portfolio.id)
-            
+
             task.add_done_callback(cleanup)
         else:
             logger.debug("Not scheduling save - save conditions not met")
@@ -145,11 +149,11 @@ class PortfolioManager:
             "[_debounced_save] Starting debounced save for portfolio %s with delay %.1fs",
             portfolio_id, self._save_delay
         )
-        
+
         try:
             # Wait for the debounce period
             await asyncio.sleep(self._save_delay)
-            
+
             # Verify this is still the current task (not cancelled and replaced)
             async with self._lock:
                 current_task = self._save_tasks.get(portfolio_id)
@@ -161,20 +165,20 @@ class PortfolioManager:
                         asyncio.current_task().get_name() if asyncio.current_task() else 'None'
                     )
                     return
-                
+
                 logger.debug(
                     "[_debounced_save] Delay completed, saving portfolio %s",
                     portfolio_id
                 )
-            
+
             # Save the portfolio
             await self._save_portfolio(portfolio_id, portfolio)
-            
+
             logger.debug(
                 "[_debounced_save] Successfully saved portfolio %s",
                 portfolio_id
             )
-                
+
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when new changes occur
             logger.debug(
@@ -227,12 +231,12 @@ class PortfolioManager:
             json.JSONEncodeError: If the portfolio can't be serialized to JSON
         """
         logger.debug("[_save_portfolio] Starting to save portfolio %s", portfolio_id)
-        
+
         if portfolio is None:
             error_msg = "Cannot save None portfolio"
             logger.error("[_save_portfolio] %s", error_msg)
             raise ValueError(error_msg)
-            
+
         if portfolio.id != portfolio_id:
             error_msg = f"Portfolio ID mismatch: {portfolio.id} != {portfolio_id}"
             logger.error("[_save_portfolio] %s", error_msg)
@@ -241,7 +245,7 @@ class PortfolioManager:
         # Create a temporary file in the same directory as the target file
         file_path = self._get_portfolio_path(portfolio_id)
         temp_file = file_path.with_suffix('.tmp')
-        
+
         logger.debug("[_save_portfolio] Will save to: %s (temp: %s)", file_path, temp_file)
 
         try:
@@ -253,12 +257,14 @@ class PortfolioManager:
             logger.debug("[_save_portfolio] Serializing portfolio %s", portfolio_id)
             portfolio_data = portfolio.to_dict()
             logger.debug("[_save_portfolio] Portfolio data serialized, converting to JSON")
-            
+
             # Debug: Log the options being saved
             if 'options' in portfolio_data:
-                logger.debug("[_save_portfolio] Options to be saved: %s", 
-                            [opt['instrument_name'] for opt in portfolio_data['options']])
-            
+                logger.debug(
+                    "[_save_portfolio] Options to be saved: %s",
+                    [opt['instrument_name'] for opt in portfolio_data['options']]
+                )
+
             json_data = json.dumps(portfolio_data, indent=2, default=str)
             logger.debug("[_save_portfolio] JSON data prepared, size: %d bytes", len(json_data))
 
@@ -271,7 +277,7 @@ class PortfolioManager:
             # Atomically replace the target file
             logger.debug("[_save_portfolio] Renaming temp file to: %s", file_path)
             temp_file.replace(file_path)
-            
+
             # Mark the portfolio as clean after successful save
             portfolio.mark_clean()
             logger.info("[_save_portfolio] Successfully saved portfolio %s to %s", portfolio_id, file_path)
@@ -283,7 +289,7 @@ class PortfolioManager:
             raise
         except OSError as oe:
             logger.error("[_save_portfolio] OS error saving portfolio %s: %s", portfolio_id, oe, exc_info=True)
-            logger.debug("[_save_portfolio] File path: %s, Temp path: %s, Parent exists: %s", 
+            logger.debug("[_save_portfolio] File path: %s, Temp path: %s, Parent exists: %s",
                          file_path, temp_file, file_path.parent.exists())
             raise
         except Exception as e:

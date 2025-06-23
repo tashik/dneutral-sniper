@@ -26,7 +26,7 @@ class SubscriptionManager:
 
     def __init__(self, deribit_client: Optional['DeribitWebsocketClient'] = None):
         """Initialize the SubscriptionManager with empty mappings.
-        
+
         Args:
             deribit_client: Optional DeribitWebsocketClient instance for direct subscription management
         """
@@ -68,7 +68,7 @@ class SubscriptionManager:
             # Add to our tracking
             self.instrument_subscriptions[instrument].add(portfolio_id)
             self.portfolio_subscriptions[portfolio_id].add(instrument)
-            
+
             # Track if this is a new instrument that needs subscribing to
             is_new_instrument = instrument not in self._all_subscribed_instruments
             if is_new_instrument:
@@ -78,19 +78,19 @@ class SubscriptionManager:
                 "Added subscription: portfolio=%s, instrument=%s (new_instrument=%s)",
                 portfolio_id, instrument, is_new_instrument
             )
-            
+
             # If we have a Deribit client and this is a new instrument, subscribe to it
             if self.deribit_client and is_new_instrument:
                 try:
                     logger.info("Subscribing to instrument: %s", instrument)
-                    
+
                     # Create a new event for this subscription
                     sub_event = asyncio.Event()
                     self._pending_subscriptions[instrument] = sub_event
-                    
+
                     # Subscribe and wait for confirmation if requested
                     success = await self.deribit_client.subscribe_to_instruments([instrument])
-                    
+
                     if wait_for_confirmation and success:
                         logger.debug("Waiting for subscription confirmation for %s", instrument)
                         try:
@@ -100,7 +100,7 @@ class SubscriptionManager:
                         except asyncio.TimeoutError:
                             logger.warning("Timeout waiting for subscription confirmation for %s", instrument)
                             success = False
-                    
+
                     if not success:
                         logger.error("Failed to subscribe to instrument: %s", instrument)
                         # Clean up if subscription failed
@@ -112,9 +112,9 @@ class SubscriptionManager:
                         if not self.portfolio_subscriptions[portfolio_id]:
                             del self.portfolio_subscriptions[portfolio_id]
                         return False
-                        
+
                     return success
-                    
+
                 except Exception as e:
                     logger.error(
                         "Failed to subscribe to instrument %s: %s",
@@ -129,12 +129,12 @@ class SubscriptionManager:
                     if not self.portfolio_subscriptions[portfolio_id]:
                         del self.portfolio_subscriptions[portfolio_id]
                     return False
-            
+
             return True
 
     async def handle_subscription_confirmation(self, instrument: str) -> None:
         """Handle subscription confirmation for an instrument.
-        
+
         Args:
             instrument: Name of the instrument that was confirmed
         """
@@ -145,7 +145,7 @@ class SubscriptionManager:
                     event.set()
                     logger.debug("Set event for confirmed subscription: %s", instrument)
                 logger.info("Subscription confirmed for instrument: %s", instrument)
-    
+
     async def remove_subscription(
         self, portfolio_id: str, instrument: str
     ) -> bool:
@@ -173,7 +173,7 @@ class SubscriptionManager:
 
             # Track if this was the last subscription to this instrument
             is_last_subscriber = not bool(self.instrument_subscriptions[instrument])
-            
+
             # Clean up empty sets
             if not self.portfolio_subscriptions[portfolio_id]:
                 del self.portfolio_subscriptions[portfolio_id]
@@ -186,11 +186,11 @@ class SubscriptionManager:
                 "Removed subscription: portfolio=%s, instrument=%s (last_subscriber=%s)",
                 portfolio_id, instrument, is_last_subscriber
             )
-            
+
             # Note: We don't actually unsubscribe from Deribit here since other portfolios
             # might still be interested in the same instrument. The WebSocket connection
             # maintains the subscription until all interested parties are gone.
-            
+
             return True
 
     async def get_portfolio_subscriptions(self, portfolio_id: str) -> Set[str]:

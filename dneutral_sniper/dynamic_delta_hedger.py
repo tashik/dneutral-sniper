@@ -1,11 +1,9 @@
 from dataclasses import dataclass
-from typing import Optional, Any, Callable, Dict, List
+from typing import Optional, Any
 import time
 import logging
 import asyncio
 import math
-
-from dneutral_sniper.deribit_client import DeribitWebsocketClient
 from dneutral_sniper.portfolio import Portfolio
 from dneutral_sniper.options import OptionModel
 
@@ -83,7 +81,7 @@ class DynamicDeltaHedger:
         self._stop_event = asyncio.Event()
         self.current_price: Optional[float] = None
         self.last_hedge_time: Optional[float] = None
-        
+
         # Only set price callback if deribit_client is provided and has the method
         if self.deribit_client is not None and hasattr(self.deribit_client, 'set_price_callback'):
             self.deribit_client.set_price_callback(self._price_callback)
@@ -174,7 +172,8 @@ class DynamicDeltaHedger:
             # (e.g., accept both 'BTC-PERPETUAL' and 'BTC' for a BTC-PERPETUAL hedger)
             base_instrument = self.config.instrument_name.split('-')[0]
             if instrument_name not in (self.config.instrument_name, base_instrument):
-                logger.debug(f"Ignoring price update for {instrument_name}, waiting for {self.config.instrument_name} or {base_instrument}")
+                logger.debug(f"Ignoring price update for {instrument_name}, "
+                             f"waiting for {self.config.instrument_name} or {base_instrument}")
                 return
 
             logger.debug(f"Processing price update for {instrument_name}: {price}")
@@ -203,13 +202,11 @@ class DynamicDeltaHedger:
             price = float(price)
 
         async with self.price_lock:
-            old_price = self.current_price
             self.current_price = price
             self._last_price_update = time.time()
 
             # Set the event to notify any waiting tasks
             self._price_update_event.set()
-
             # Log price update with change percentage if we had a previous price
             # if old_price is not None and old_price > 0:
             #     pct_change = ((price - old_price) / old_price) * 100
@@ -481,14 +478,16 @@ class DynamicDeltaHedger:
                 return self.current_price
             else:
                 logger.warning(
-                    f"[PRICE_GET] Price update event received but current_price is None for {self.config.instrument_name}"
+                    f"[PRICE_GET] Price update event received but current_price is None for "
+                    f"{self.config.instrument_name}"
                 )
                 return None
 
         except asyncio.TimeoutError:
             if self.current_price is not None:
                 logger.warning(
-                    f"[PRICE_GET] Timed out waiting for price update for {self.config.instrument_name}, "
+                    f"[PRICE_GET] Timed out waiting for price update for "
+                    f"{self.config.instrument_name}, "
                     f"using last known price: ${self.current_price:.2f} "
                     f"(age: {current_time - self._last_price_update:.1f}s)"
                 )
@@ -632,7 +631,6 @@ class DynamicDeltaHedger:
         between the needed hedge amount and the actual hedged amount exceeds the minimum threshold.
 
         The initial_option_usd_value dict stores tuples of (needed_hedge, actual_hedge).
-        When actual_hedge reaches needed_hedge, no more hedging is needed for that option.
         """
         required_hedge_qty = 0.0
         options_to_hedge = []
@@ -647,7 +645,6 @@ class DynamicDeltaHedger:
                 # Track the unrounded amount for proportional distribution later
                 required_hedge_qty += required_qty
                 options_to_hedge.append((instrument, needed_hedge, actual_hedge))
-
 
         if abs(required_hedge_qty) >= min_hedge:
             logger.info("Processing initial hedge")
@@ -713,14 +710,14 @@ class DynamicDeltaHedger:
         # Update portfolio state
         logger.debug(f"[DEBUG] Before hedge - initial_usd_hedge_position: {self.portfolio.initial_usd_hedge_position}")
         logger.debug(f"[DEBUG] Required hedge qty: {required_hedge_qty}")
-        
+
         self.portfolio.initial_usd_hedged = True
         old_hedge_qty = self.portfolio.initial_usd_hedge_position
         new_hedge_qty = old_hedge_qty + required_hedge_qty
-        
+
         logger.debug(f"[DEBUG] Setting initial_usd_hedge_position to {new_hedge_qty}")
         self.portfolio.initial_usd_hedge_position = new_hedge_qty
-        
+
         # Verify the value was set correctly
         logger.debug(f"[DEBUG] After set - initial_usd_hedge_position: {self.portfolio.initial_usd_hedge_position}")
 

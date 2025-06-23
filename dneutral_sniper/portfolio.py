@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -95,8 +94,10 @@ class EventEmitter:
             # Log any exceptions from listeners
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
-                    logger.error(f"Error in event listener {i} for {event.event_type}: {result}",
-                               exc_info=result)
+                    logger.error(
+                        f"Error in event listener {i} for {event.event_type}: {result}",
+                        exc_info=result
+                    )
         else:
             logger.debug(f"No listeners for event: {event.event_type}")
 
@@ -273,8 +274,10 @@ class Portfolio(EventEmitter):
                     try:
                         # Parse ISO format string to datetime
                         expiry = datetime.fromisoformat(expiry)
-                    except (ValueError, TypeError) as e:
-                        raise ValueError(f"Invalid expiry format. Must be ISO format datetime string or datetime object: {e}")
+                    except (ValueError, TypeError) as err:
+                        raise ValueError(
+                            f"Invalid expiry format. Must be ISO format datetime string or datetime object: {err}"
+                        )
                 else:
                     raise ValueError("Expiry must be a datetime object or ISO format datetime string")
 
@@ -309,10 +312,26 @@ class Portfolio(EventEmitter):
                 'option_type': OptionType(option_data['option_type']),
                 'underlying': option_data['underlying'],
                 'contract_type': ContractType(option_data['contract_type']),
-                'mark_price': float(option_data.get('mark_price', 0.0)) if option_data.get('mark_price') is not None else None,
-                'iv': float(option_data['iv']) if 'iv' in option_data and option_data['iv'] is not None else None,
-                'usd_value': float(option_data['usd_value']) if 'usd_value' in option_data and option_data['usd_value'] is not None else None,
-                'delta': float(option_data['delta']) if 'delta' in option_data and option_data['delta'] is not None else None
+                'mark_price': (
+                    float(option_data.get('mark_price', 0.0))
+                    if option_data.get('mark_price') is not None
+                    else None
+                ),
+                'iv': (
+                    float(option_data['iv'])
+                    if 'iv' in option_data and option_data['iv'] is not None
+                    else None
+                ),
+                'usd_value': (
+                    float(option_data['usd_value'])
+                    if 'usd_value' in option_data and option_data['usd_value'] is not None
+                    else None
+                ),
+                'delta': (
+                    float(option_data['delta'])
+                    if 'delta' in option_data and option_data['delta'] is not None
+                    else None
+                )
             }
 
             logger.debug("Creating VanillaOption with args: %s",
@@ -548,14 +567,20 @@ class Portfolio(EventEmitter):
                     if value is not None:
                         serialized[field] = value
 
-            logger.debug("Serialized option %s: %s", option.instrument_name,
-                        {k: v for k, v in serialized.items() if k != 'expiry'})
+            logger.debug(
+                "Serialized option %s: %s",
+                option.instrument_name,
+                {k: v for k, v in serialized.items() if k != 'expiry'}
+            )
 
             return serialized
 
         except Exception as e:
-            logger.error("Failed to serialize option %s: %s",
-                        getattr(option, 'instrument_name', 'unknown'), str(e))
+            logger.error(
+                "Failed to serialize option %s: %s",
+                getattr(option, 'instrument_name', 'unknown'),
+                str(e)
+            )
             raise
 
     async def add_option(
@@ -621,8 +646,12 @@ class Portfolio(EventEmitter):
                 # For sold options (new_qty < 0), add negative premium to track hedge needed
                 hedge_delta = premium_usd * new_qty
                 self.initial_option_usd_value[option.instrument_name][0] += hedge_delta
-                existing.usd_value = self.initial_option_usd_value[option.instrument_name][0] / total_qty
-                logger.debug(f"[add_option] Updated initial_option_usd_value for {option.instrument_name} by {hedge_delta}, new value: {self.initial_option_usd_value[option.instrument_name][0]}")
+                new_total = self.initial_option_usd_value[option.instrument_name][0]
+                existing.usd_value = new_total / total_qty
+                logger.debug(
+                    f"[add_option] Updated initial_option_usd_value for {option.instrument_name} " +
+                    f"by {hedge_delta}, new value: {new_total}"
+                )
 
             # Emit update event with trade details
             trade_data = None
@@ -828,8 +857,14 @@ class Portfolio(EventEmitter):
         elif is_flipping:
             # Calculate PNL for the closed portion in BTC terms
             closed_portion = -old_pos
-            btc_closed_portion = abs(closed_portion) / self._futures_avg_entry
-            realized_pnl_btc = btc_closed_portion * (price - self._futures_avg_entry) * (-1 if closed_portion > 0 else 1)
+            btc_closed_portion = (
+                abs(closed_portion) / self._futures_avg_entry
+            )
+            realized_pnl_btc = (
+                btc_closed_portion *
+                (price - self._futures_avg_entry) *
+                (-1 if closed_portion > 0 else 1)
+            )
             self.realized_pnl = self._realized_pnl + realized_pnl_btc  # Use property setter
             # For the new position, the average entry is the current price
             self.futures_avg_entry = price if new_pos != 0 else 0.0

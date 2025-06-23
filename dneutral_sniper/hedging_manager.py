@@ -7,20 +7,19 @@ of hedgers, distributes price updates, and provides a unified interface for mana
 all hedges.
 """
 import asyncio
-import json
 import logging
-import os
-import threading
 from collections import defaultdict
-from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, List, Callable
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Set, Union
+
 from dataclasses import dataclass
 
+from .deribit_client import DeribitWebsocketClient
 from .dynamic_delta_hedger import DynamicDeltaHedger, HedgerConfig
+from .portfolio import Portfolio
 from .portfolio_manager import PortfolioManager
 from .subscription_manager import SubscriptionManager
-from .deribit_client import DeribitWebsocketClient
-from .portfolio import PortfolioEvent, PortfolioEventType
+from .types import PortfolioEvent, PortfolioEventType
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +52,10 @@ class HedgingManager:
 
         Args:
             portfolio_manager: The portfolio manager instance
-            subscription_manager: Optional subscription manager instance. If not provided, a new one will be created.
-            deribit_client: The Deribit client instance (shared between all hedgers). Required if subscription_manager is not provided.
+            subscription_manager: Optional subscription manager instance.
+                If not provided, a new one will be created.
+            deribit_client: The Deribit client instance (shared between all hedgers).
+                Required if subscription_manager is not provided.
             default_hedger_config: Default configuration for new hedgers (dict or HedgerConfig)
         """
         self.portfolio_manager = portfolio_manager
@@ -75,10 +76,15 @@ class HedgingManager:
 
         # Register subscription confirmation handler if we have a deribit client
         if self.deribit_client:
-            self.deribit_client.add_subscription_handler(self._handle_subscription_confirmation)
+            self.deribit_client.add_subscription_handler(
+                self._handle_subscription_confirmation
+            )
 
         # Set up price callback for the shared client
-        self._price_handlers: Dict[str, List[Callable[[str, float], None]]] = defaultdict(list)
+        self._price_handlers: Dict[
+            str,
+            List[Callable[[str, float], None]]
+        ] = defaultdict(list)
         if self.deribit_client:
             self.deribit_client.set_price_callback(self._on_price_update)
 
@@ -331,8 +337,10 @@ class HedgingManager:
         if not instrument_name or portfolio_id not in self.hedgers:
             return
 
-        logger.info("Option %s added to portfolio %s, updating subscriptions",
-                   instrument_name, portfolio_id)
+        logger.info(
+            "Option %s added to portfolio %s, updating subscriptions",
+            instrument_name, portfolio_id
+        )
 
         hedger_info = self.hedgers[portfolio_id]
 
@@ -357,8 +365,10 @@ class HedgingManager:
                 wait_for_confirmation=False  # Don't wait to avoid blocking the event loop
             )
 
-            logger.info("Subscribed to new option %s for portfolio %s",
-                       instrument_name, portfolio_id)
+            logger.info(
+                "Subscribed to new option %s for portfolio %s",
+                instrument_name, portfolio_id
+            )
 
         except Exception as e:
             logger.error("Failed to subscribe to new option %s: %s", instrument_name, e, exc_info=True)
@@ -375,8 +385,10 @@ class HedgingManager:
         if not instrument_name or portfolio_id not in self.hedgers:
             return
 
-        logger.info("Option %s removed from portfolio %s, cleaning up",
-                   instrument_name, portfolio_id)
+        logger.info(
+            "Option %s removed from portfolio %s, cleaning up",
+            instrument_name, portfolio_id
+        )
 
         hedger_info = self.hedgers[portfolio_id]
 
@@ -387,8 +399,10 @@ class HedgingManager:
 
             # Unsubscribe from the instrument
             await self.subscription_manager.remove_subscription(portfolio_id, instrument_name)
-            logger.info("Unsubscribed from removed option %s for portfolio %s",
-                      instrument_name, portfolio_id)
+            logger.info(
+                "Unsubscribed from removed option %s for portfolio %s",
+                instrument_name, portfolio_id
+            )
 
         except Exception as e:
             logger.error("Failed to clean up removed option %s: %s", instrument_name, e, exc_info=True)
@@ -418,16 +432,20 @@ class HedgingManager:
                     self._price_handlers[base_instrument] = []
                 if handler not in self._price_handlers[base_instrument]:
                     self._price_handlers[base_instrument].append(handler)
-                    logger.debug("Registered handler for base instrument %s (now %d handlers)",
-                                base_instrument, len(self._price_handlers[base_instrument]))
+                    logger.debug(
+                        "Registered handler for base instrument %s (now %d handlers)",
+                        base_instrument, len(self._price_handlers[base_instrument])
+                    )
 
             # Always register for the specific instrument as well
             if instrument not in self._price_handlers:
                 self._price_handlers[instrument] = []
             if handler not in self._price_handlers[instrument]:
                 self._price_handlers[instrument].append(handler)
-                logger.debug("Registered handler for instrument %s (now %d handlers)",
-                            instrument, len(self._price_handlers[instrument]))
+                logger.debug(
+                    "Registered handler for instrument %s (now %d handlers)",
+                    instrument, len(self._price_handlers[instrument])
+                )
 
     async def _unregister_price_handler(self, instrument: str, handler: Callable[[str, float], None]) -> None:
         """Unregister a price update handler for an instrument.
@@ -445,8 +463,10 @@ class HedgingManager:
             if instrument in self._price_handlers:
                 if handler in self._price_handlers[instrument]:
                     self._price_handlers[instrument].remove(handler)
-                    logger.debug("Unregistered handler for instrument %s (%d handlers remain)",
-                                instrument, len(self._price_handlers[instrument]))
+                    logger.debug(
+                        "Unregistered handler for instrument %s (%d handlers remain)",
+                        instrument, len(self._price_handlers[instrument])
+                    )
 
                 # Clean up empty handler lists
                 if not self._price_handlers[instrument]:
@@ -459,8 +479,10 @@ class HedgingManager:
                 if base_instrument in self._price_handlers:
                     if handler in self._price_handlers[base_instrument]:
                         self._price_handlers[base_instrument].remove(handler)
-                        logger.debug("Unregistered handler for base instrument %s (%d handlers remain)",
-                                    base_instrument, len(self._price_handlers[base_instrument]))
+                        logger.debug(
+                            "Unregistered handler for base instrument %s (%d handlers remain)",
+                            base_instrument, len(self._price_handlers[base_instrument])
+                        )
 
                     # Clean up empty handler lists
                     if not self._price_handlers[base_instrument]:
@@ -513,8 +535,10 @@ class HedgingManager:
         for handler in handlers_to_call:
             try:
                 handler_name = getattr(handler, '__name__', str(handler))
-                logger.debug("[PRICE_UPDATE] Calling handler %s for %s",
-                           handler_name, instrument)
+                logger.debug(
+                    "[PRICE_UPDATE] Calling handler %s for %s",
+                    handler_name, instrument
+                )
 
                 if asyncio.iscoroutinefunction(handler):
                     # Schedule the coroutine to run concurrently
@@ -536,8 +560,10 @@ class HedgingManager:
                     task = loop.run_in_executor(None, handler, instrument, float(price))
                     tasks.append(task)
             except Exception as e:
-                logger.error("Error scheduling price handler %s: %s",
-                            getattr(handler, '__name__', str(handler)), e, exc_info=True)
+                logger.error(
+                    "Error scheduling price handler %s: %s",
+                    getattr(handler, '__name__', str(handler)), e, exc_info=True
+                )
 
         # Wait for all handlers to complete with timeout
         if tasks:
@@ -548,7 +574,7 @@ class HedgingManager:
             except Exception as e:
                 logger.error("Error in price handlers for %s: %s", instrument, e, exc_info=True)
 
-        #logger.info("Price update processed for %s: %f", instrument, price)
+        # logger.info("Price update processed for %s: %f", instrument, price)
 
     async def _handle_subscription_confirmation(self, instrument: str) -> None:
         """Handle subscription confirmation for an instrument.
@@ -602,11 +628,15 @@ class HedgingManager:
                                     'timestamp': datetime.now().isoformat()
                                 }
                             ))
-                            logger.debug("Emitted subscription confirmation event for %s on portfolio %s",
-                                        instrument, portfolio_id)
+                            logger.debug(
+                                "Emitted subscription confirmation event for %s on portfolio %s",
+                                instrument, portfolio_id
+                            )
                     except Exception as e:
-                        logger.error("Error notifying portfolio %s about subscription confirmation: %s",
-                                    portfolio_id, e, exc_info=True)
+                        logger.error(
+                            "Error notifying portfolio %s about subscription confirmation: %s",
+                            portfolio_id, e, exc_info=True
+                        )
 
             except Exception as e:
                 logger.error("Error forwarding subscription confirmation for %s: %s", instrument, e, exc_info=True)
@@ -616,9 +646,11 @@ class HedgingManager:
             self._subscription_waiter.set_result(instrument)
 
         # Log the current state of subscriptions
-        logger.debug("Current subscribed instruments: %s",
-                    list(self.subscribed_instruments)[:10] +
-                    (['...'] if len(self.subscribed_instruments) > 10 else []))
+        logger.debug(
+            "Current subscribed instruments: %s",
+            list(self.subscribed_instruments)[:10] +
+            (['...'] if len(self.subscribed_instruments) > 10 else [])
+        )
 
         # If we have a price for this instrument, trigger an immediate update
         if hasattr(self, 'deribit_client') and self.deribit_client:
@@ -696,14 +728,15 @@ class HedgingManager:
         # Now acquire the lock again to update the state
         async with self._lock:
             # Double-check if another task added a hedger while we were working
-            if portfolio_id in self.hedgers and self.hedgers[portfolio_id].task and not self.hedgers[portfolio_id].task.done():
-                logger.debug("Another task added a hedger while we were working, aborting")
-                # Clean up the hedger we created
-                try:
-                    await hedger.stop()
-                except Exception as e:
-                    logger.warning("Error cleaning up duplicate hedger: %s", e)
-                return False
+            if portfolio_id in self.hedgers:
+                if self.hedgers[portfolio_id].task and not self.hedgers[portfolio_id].task.done():
+                    logger.debug("Another task added a hedger while we were working, aborting")
+                    # Clean up the hedger we created
+                    try:
+                        await hedger.stop()
+                    except Exception as e:
+                        logger.warning("Error cleaning up duplicate hedger: %s", e)
+                    return False
 
             # Store the hedger info
             self.hedgers[portfolio_id] = HedgerInfo(hedger=hedger)
@@ -1026,8 +1059,8 @@ class HedgingManager:
             return success
 
         except asyncio.TimeoutError:
-                logger.error(f"Timeout ({timeout}s) while trying to start hedging for portfolio {portfolio_id}")
-                return False
+            logger.error(f"Timeout ({timeout}s) while trying to start hedging for portfolio {portfolio_id}")
+            return False
 
         except Exception as e:
             logger.error(f"Error starting hedging for portfolio {portfolio_id}: {e}", exc_info=True)

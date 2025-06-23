@@ -226,8 +226,10 @@ class OptionModel:
 
             # Get initial USD value if available
             initial_value = self.portfolio.initial_option_usd_value.get(option.instrument_name, [0.0, 0.0])
-            # initial_value is [target_usd_value, actual_usd_value], we use actual_usd_value (index 1) for PNL calculation
-            initial_value = initial_value[1] if isinstance(initial_value, (list, tuple)) and len(initial_value) > 1 else 0.0
+            # initial_value is [target_usd_value, actual_usd_value],
+            # we use actual_usd_value (index 1) for PNL calculation
+            is_use_actual_value = isinstance(initial_value, (list, tuple)) and len(initial_value) > 1
+            initial_value = (initial_value[1] if is_use_actual_value else 0.0)
 
             # Calculate current USD value
             if option.contract_type == ContractType.INVERSE:
