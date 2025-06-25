@@ -79,7 +79,7 @@ class TestDynamicHedgingIntegration:
     async def test_portfolio(self, tmp_path):
         """Create a test portfolio with BTC underlying and options."""
         # Create a portfolio manager with a temporary directory
-        portfolio_manager = PortfolioManager(data_dir=str(tmp_path))
+        portfolio_manager = PortfolioManager(portfolios_dir=str(tmp_path))
 
         # Create a new portfolio
         portfolio_id = "test_hedging_portfolio"
@@ -177,7 +177,7 @@ class TestDynamicHedgingIntegration:
     async def test_dynamic_hedging_flow(self, test_portfolio, deribit_client, tmp_path):
         """Test the complete dynamic hedging flow with live updates."""
         logger.info("1. Starting test_dynamic_hedging_flow")
-        
+
         # Ensure we have a proper portfolio object
         logger.info("2. Getting test portfolio")
         if asyncio.iscoroutine(test_portfolio):
@@ -258,7 +258,7 @@ class TestDynamicHedgingIntegration:
                         None, price_callback, instrument_name, initial_price
                     )
                 logger.info("19.2. Price update sent and processed successfully")
-                
+
                 # Give the event loop a chance to process the update
                 await asyncio.sleep(0.1)
             except Exception as e:
@@ -295,7 +295,7 @@ class TestDynamicHedgingIntegration:
                         None, price_callback, instrument_name, new_price
                     )
                 logger.info("21.2. Price update sent and processed successfully")
-                
+
                 # Give the event loop a chance to process the update
                 await asyncio.sleep(0.1)
             except Exception as e:

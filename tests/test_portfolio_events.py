@@ -36,7 +36,7 @@ def temp_portfolios_dir():
 @pytest_asyncio.fixture
 async def portfolio_manager(temp_portfolios_dir):
     """Create a PortfolioManager with a temporary directory."""
-    manager = PortfolioManager(data_dir=temp_portfolios_dir)
+    manager = PortfolioManager(portfolios_dir=temp_portfolios_dir)
     await manager.initialize()
     try:
         yield manager

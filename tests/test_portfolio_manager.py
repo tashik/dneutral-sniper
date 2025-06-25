@@ -32,7 +32,7 @@ def temp_portfolios_dir():
 @pytest.fixture
 async def portfolio_manager(temp_portfolios_dir):
     """Create a PortfolioManager instance with a temporary directory."""
-    manager = PortfolioManager(data_dir=temp_portfolios_dir)
+    manager = PortfolioManager(portfolios_dir=temp_portfolios_dir)
     await manager.initialize()
     return manager
 
@@ -60,7 +60,7 @@ class TestPortfolioManager:
     @pytest_asyncio.fixture
     async def portfolio_manager(self, temp_portfolios_dir):
         """Create a PortfolioManager instance with a temporary directory."""
-        manager = PortfolioManager(data_dir=temp_portfolios_dir)
+        manager = PortfolioManager(portfolios_dir=temp_portfolios_dir)
         await manager.initialize()
         return manager
 

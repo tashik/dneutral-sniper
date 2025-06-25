@@ -28,26 +28,13 @@ class PortfolioManager:
     access to portfolios.
     """
 
-    def __init__(self, data_dir: str = "portfolios", portfolios_dir: Optional[str] = None):
+    def __init__(self, portfolios_dir: str = "data/portfolios"):
         """Initialize the portfolio manager.
 
         Args:
-            data_dir: Directory where portfolio files will be stored
-            portfolios_dir: Deprecated, use data_dir instead. Will be removed in a future version.
+            portfolios_dir: Directory where portfolio files will be stored
         """
-        # For backward compatibility, allow both data_dir and portfolios_dir
-        # but data_dir takes precedence if both are provided
-        if portfolios_dir is not None and data_dir == "portfolios":
-            import warnings
-            warnings.warn(
-                "The 'portfolios_dir' parameter is deprecated and will be removed in a future version. "
-                "Use 'data_dir' instead.",
-                DeprecationWarning,
-                stacklevel=2
-            )
-            self.data_dir = Path(portfolios_dir)
-        else:
-            self.data_dir = Path(data_dir)
+        self.data_dir = Path(portfolios_dir)
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.portfolios: Dict[str, Portfolio] = {}
@@ -385,12 +372,23 @@ class PortfolioManager:
             error_count = 0
 
             try:
+                # Log the absolute path being searched
+                search_path = str(self.data_dir.absolute() / "portfolio_*.json")
+                logger.info(f"Searching for portfolio files at: {search_path}")
+                
+                # List all files in the directory for debugging
+                all_files = list(self.data_dir.glob("*"))
+                logger.info(f"All files in directory: {[str(f) for f in all_files]}")
+                
+                # Now search for portfolio files
                 portfolio_files = list(self.data_dir.glob("portfolio_*.json"))
-                logger.debug("Found %d portfolio files to load", len(portfolio_files))
+                logger.info("Found %d portfolio files to load: %s", 
+                          len(portfolio_files), 
+                          [str(f) for f in portfolio_files])
 
                 for file_path in portfolio_files:
                     try:
-                        logger.debug("Loading portfolio from %s", file_path)
+                        logger.info("Attempting to load portfolio from %s", file_path)
 
                         # Load the portfolio from file
                         portfolio = Portfolio.load_from_file(str(file_path))

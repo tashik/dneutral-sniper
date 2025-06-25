@@ -74,7 +74,7 @@ class HedgingManagerTestHarness:
         self.subscription_manager = SubscriptionManager(deribit_client=self.deribit_client)
 
         # Initialize portfolio manager
-        self.portfolio_manager = PortfolioManager(data_dir='test_data')
+        self.portfolio_manager = PortfolioManager(portfolios_dir='test_data')
 
         # Create a test portfolio
         portfolio_id, self.test_portfolio = await self.portfolio_manager.create_portfolio(

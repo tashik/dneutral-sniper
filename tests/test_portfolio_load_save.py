@@ -32,7 +32,7 @@ def temp_dir():
 @pytest_asyncio.fixture
 async def portfolio_manager(temp_dir):
     """Create a portfolio manager with a temporary directory."""
-    manager = PortfolioManager(data_dir=str(temp_dir))
+    manager = PortfolioManager(portfolios_dir=str(temp_dir))
     yield manager
     # Clean up
     await manager.close()
@@ -44,9 +44,9 @@ async def sample_portfolio(portfolio_manager):
         portfolio_id="test_portfolio",
         underlying="BTC"
     )
-    
+
     expiry = datetime.now(timezone.utc) + timedelta(days=30)
-    
+
     # Add a call option
     call_option = VanillaOption(
         instrument_name="BTC-30JUL25-120000-C",
@@ -62,7 +62,7 @@ async def sample_portfolio(portfolio_manager):
         delta=0.45
     )
     await portfolio.add_option(call_option, premium_usd=1000.0)
-    
+
     # Add a put option
     put_option = VanillaOption(
         instrument_name="BTC-30JUL25-100000-P",
@@ -78,7 +78,7 @@ async def sample_portfolio(portfolio_manager):
         delta=-0.35
     )
     await portfolio.add_option(put_option, premium_usd=600.0)
-    
+
     # Save the portfolio
     await portfolio_manager.save_portfolio(portfolio_id)
     return portfolio
@@ -88,21 +88,21 @@ async def test_portfolio_save_and_load(portfolio_manager, sample_portfolio):
     """Test saving a portfolio to a file and loading it back."""
     # Save the portfolio
     await portfolio_manager.save_portfolio(sample_portfolio.id)
-    
+
     # Verify the file was created
     portfolio_file = Path(portfolio_manager.data_dir) / f"portfolio_{sample_portfolio.id}.json"
     assert portfolio_file.exists(), "Portfolio file was not created"
-    
+
     # Load the portfolio back using the manager
     loaded_portfolio = await portfolio_manager.get_portfolio(sample_portfolio.id)
-    
+
     # Verify basic properties
     assert loaded_portfolio.id == sample_portfolio.id
     assert loaded_portfolio.underlying == sample_portfolio.underlying
-    
+
     # Verify options were loaded correctly
     assert len(loaded_portfolio.options) == len(sample_portfolio.options)
-    
+
     for opt_name, option in sample_portfolio.options.items():
         assert opt_name in loaded_portfolio.options
         loaded_opt = loaded_portfolio.options[opt_name]
@@ -124,7 +124,7 @@ async def test_portfolio_load_existing(portfolio_manager, temp_dir):
         portfolio_id="test_load_existing",
         underlying="BTC"
     )
-    
+
     # Add an option
     expiry = datetime.now(timezone.utc) + timedelta(days=30)
     call_option = VanillaOption(
@@ -141,19 +141,19 @@ async def test_portfolio_load_existing(portfolio_manager, temp_dir):
         delta=0.4
     )
     await portfolio.add_option(call_option, premium_usd=800.0)
-    
+
     # Save the portfolio
     await portfolio_manager.save_portfolio(portfolio_id)
-    
+
     # Create a new portfolio manager that will load the saved portfolio
-    new_manager = PortfolioManager(data_dir=str(temp_dir))
+    new_manager = PortfolioManager(portfolios_dir=str(temp_dir))
     try:
         # Load all portfolios (should load our saved one)
         await new_manager.load_all_portfolios()
-        
+
         # Get the loaded portfolio
         loaded_portfolio = await new_manager.get_portfolio(portfolio_id)
-        
+
         # Verify basic properties
         assert loaded_portfolio is not None
         assert loaded_portfolio.id == portfolio_id

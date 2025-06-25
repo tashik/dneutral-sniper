@@ -107,32 +107,57 @@ class Portfolio(EventEmitter):
         """Convert the portfolio to a dictionary.
 
         Returns:
-            Dictionary containing all portfolio data
+            Dictionary containing all portfolio data with proper serialization
         """
+        def safe_serialize_datetime(dt):
+            """Safely serialize datetime to ISO format string."""
+            if dt is None:
+                return None
+            if isinstance(dt, str):
+                try:
+                    # Validate it's a valid datetime string
+                    parsed_dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+                    return parsed_dt.isoformat()
+                except (ValueError, AttributeError):
+                    return datetime.now(timezone.utc).isoformat()
+            if hasattr(dt, 'isoformat'):
+                return dt.isoformat()
+            return datetime.now(timezone.utc).isoformat()
+            
+        # Get current time once to ensure consistency
+        now = datetime.now(timezone.utc)
+        
+        # Get created_at with fallback
+        created_at = getattr(self, 'created_at', now)
+        
+        # Get updated_at with fallback
+        updated_at = getattr(self, 'updated_at', now) if hasattr(self, 'updated_at') else now
+        
+        # Get options, filtering out None values
+        options = [
+            self._serialize_option(option)
+            for option in getattr(self, 'options', {}).values()
+            if option is not None
+        ]
+        
         return {
-            "portfolio_id": self.id,
+            "portfolio_id": getattr(self, 'id', str(uuid.uuid4())),
+            "name": str(getattr(self, 'name', 'Unnamed Portfolio')),
+            "description": str(getattr(self, 'description', '')),
             "underlying": getattr(self, 'underlying', None),
-            "initial_balance": getattr(self, 'initial_balance', 0.0),
-            "futures_position": getattr(self, 'futures_position', 0.0),
-            "futures_avg_entry": getattr(self, 'futures_avg_entry', 0.0),
-            "last_hedge_price": getattr(self, 'last_hedge_price', None),
-            "realized_pnl": getattr(self, 'realized_pnl', 0.0),
-            "initial_option_usd_value": getattr(
-                self, 'initial_option_usd_value', {}
-            ),
-            "trades": getattr(self, 'trades', []),
-            "initial_usd_hedged": getattr(self, 'initial_usd_hedged', False),
-            "initial_usd_hedge_position": getattr(
-                self, 'initial_usd_hedge_position', 0.0
-            ),
-            "initial_usd_hedge_avg_entry": getattr(
-                self, 'initial_usd_hedge_avg_entry', 0.0
-            ),
-            "options": [
-                self._serialize_option(option)
-                for option in getattr(self, 'options', {}).values()
-                if option is not None
-            ]
+            "initial_balance": float(getattr(self, 'initial_balance', 0.0)),
+            "futures_position": float(getattr(self, 'futures_position', 0.0)),
+            "futures_avg_entry": float(getattr(self, 'futures_avg_entry', 0.0)),
+            "last_hedge_price": float(getattr(self, 'last_hedge_price', 0.0)) if getattr(self, 'last_hedge_price', None) is not None else None,
+            "realized_pnl": float(getattr(self, 'realized_pnl', 0.0)),
+            "initial_option_usd_value": dict(getattr(self, 'initial_option_usd_value', {})),
+            "trades": list(getattr(self, 'trades', [])),
+            "initial_usd_hedged": bool(getattr(self, 'initial_usd_hedged', False)),
+            "initial_usd_hedge_position": float(getattr(self, 'initial_usd_hedge_position', 0.0)),
+            "initial_usd_hedge_avg_entry": float(getattr(self, 'initial_usd_hedge_avg_entry', 0.0)),
+            "created_at": safe_serialize_datetime(created_at),
+            "updated_at": safe_serialize_datetime(updated_at),
+            "options": options
         }
 
     @classmethod
@@ -152,10 +177,16 @@ class Portfolio(EventEmitter):
             raise ValueError("Data must be a dictionary")
 
         portfolio_id = data.get('portfolio_id')
+        if not portfolio_id:
+            raise ValueError("Missing required field: portfolio_id")
         portfolio = cls(portfolio_id=portfolio_id)
+        # Ensure the portfolio ID is set correctly in case it was generated
+        portfolio.id = portfolio_id
 
         # Set basic fields
         basic_fields = [
+            'name',
+            'description',
             'underlying',
             'initial_balance',
             'futures_position',
@@ -166,8 +197,14 @@ class Portfolio(EventEmitter):
             'trades',
             'initial_usd_hedged',
             'initial_usd_hedge_position',
-            'initial_usd_hedge_avg_entry'
+            'initial_usd_hedge_avg_entry',
+            'created_at',
+            'updated_at'
         ]
+
+        # Set the underlying from data if provided, otherwise use the one from portfolio_id
+        if 'underlying' in data and data['underlying']:
+            portfolio._underlying = data['underlying']
 
         for field in basic_fields:
             if field in data:

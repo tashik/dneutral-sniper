@@ -25,7 +25,7 @@ class TestHedgingManager:
         portfolios_dir = tmp_path / "portfolios"
 
         # Create and initialize the PortfolioManager
-        pm = PortfolioManager(data_dir=portfolios_dir)
+        pm = PortfolioManager(portfolios_dir=portfolios_dir)
         await pm.initialize()
 
         # Create a test portfolio using the PortfolioManager
@@ -184,7 +184,7 @@ class TestHedgingManager:
                     print("9. Successfully removed hedger")
                 except asyncio.TimeoutError:
                     pytest.fail("Timeout while removing hedger")
-                
+
                 assert portfolio_id not in hedging_manager.hedgers
                 mock_hedger.stop.assert_called_once()
                 print("10. Verified hedger removal")

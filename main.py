@@ -37,28 +37,28 @@ DEFAULT_CONFIG = {
 
 def setup_logging(debug: bool = False) -> None:
     """Configure logging for the application with both console and file output.
-    
+
     Args:
         debug: If True, enable DEBUG level logging and verbose output
     """
     import os
     from logging.handlers import RotatingFileHandler
-    
+
     # Create logs directory if it doesn't exist
     log_dir = "logs"
     os.makedirs(log_dir, exist_ok=True)
-    
+
     # Create a timestamped log file name
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     log_file = os.path.join(log_dir, f'dneutral_sniper_{timestamp}.log')
-    
+
     log_level = logging.DEBUG if debug else logging.INFO
-    
+
     # Clear any existing handlers
     root_logger = logging.getLogger()
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
-    
+
     # Create formatters
     debug_formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -68,13 +68,13 @@ def setup_logging(debug: bool = False) -> None:
         '%(asctime)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-    
+
     # Create console handler
     console_handler = logging.StreamHandler()
     console_handler.setLevel(log_level)
     console_formatter = debug_formatter if debug else info_formatter
     console_handler.setFormatter(console_formatter)
-    
+
     # Create file handler with rotation (10MB per file, keep 5 backup files)
     file_handler = RotatingFileHandler(
         log_file,
@@ -84,16 +84,16 @@ def setup_logging(debug: bool = False) -> None:
     )
     file_handler.setLevel(logging.DEBUG)  # Always log everything to file
     file_handler.setFormatter(debug_formatter)
-    
+
     # Configure root logger
     root_logger.setLevel(logging.DEBUG)  # Set to lowest level, let handlers filter
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
-    
+
     # Log file location
     logger = logging.getLogger(__name__)
     logger.info(f"Logging to file: {os.path.abspath(log_file)}")
-    
+
     # Set log levels for specific modules
     if debug:
         logging.getLogger('dneutral_sniper').setLevel(logging.DEBUG)
@@ -142,7 +142,7 @@ async def initialize_managers(
         await deribit_client.connect()
 
         # Initialize managers
-        portfolio_manager = PortfolioManager(data_dir=config["portfolios_dir"])
+        portfolio_manager = PortfolioManager(portfolios_dir=config["portfolios_dir"])
         await portfolio_manager.initialize()
 
         portfolios = await portfolio_manager.list_portfolios()
@@ -254,7 +254,7 @@ def parse_args() -> Dict[str, Any]:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='DNEUTRAL SNIPER - Multi-Portfolio Delta Hedging System')
     parser.add_argument(
-        '--debug', 
+        '--debug',
         action='store_true',
         help='Enable debug logging and verbose output'
     )
@@ -265,10 +265,10 @@ async def main():
     """Main entry point for the DNEUTRAL SNIPER application."""
     # Parse command line arguments
     args = parse_args()
-    
+
     # Setup logging based on debug flag
     setup_logging(debug=args.get('debug', False))
-    
+
     logger.info("DNEUTRAL SNIPER started")
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("Debug logging enabled")
